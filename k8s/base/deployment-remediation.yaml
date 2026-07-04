@@ -1,0 +1,60 @@
+# Safe to scale replicas > 1: AgentRun.active_claim (unique index) prevents
+# two pods claiming the same incident, and ResourceLock serializes writes
+# per-service so concurrent remediations never touch the same service at
+# once (see agents/remediation.py). Default is 1 given this is the
+# highest-blast-radius agent — raise it deliberately, not by default.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-remediation
+  namespace: sre-platform
+  labels:
+    app: sre-platform
+    agent: remediation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-platform
+      agent: remediation
+  template:
+    metadata:
+      labels:
+        app: sre-platform
+        agent: remediation
+    spec:
+      containers:
+        - name: remediation
+          image: sre-platform:latest
+          args: ["remediation"]
+          envFrom:
+            - configMapRef:
+                name: sre-config
+            - secretRef:
+                name: sre-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/sre-agent-healthy) )) -lt 300"
+            initialDelaySeconds: 20
+            periodSeconds: 60
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+      volumes:
+        - name: tmp
+          emptyDir: {}

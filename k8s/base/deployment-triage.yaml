@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-triage
+  namespace: sre-platform
+  labels:
+    app: sre-platform
+    agent: triage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-platform
+      agent: triage
+  template:
+    metadata:
+      labels:
+        app: sre-platform
+        agent: triage
+    spec:
+      containers:
+        - name: triage
+          image: sre-platform:latest
+          args: ["triage"]
+          envFrom:
+            - configMapRef:
+                name: sre-config
+            - secretRef:
+                name: sre-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          # No HTTP server here — this is a polling loop, so liveness reads
+          # the heartbeat file BaseAgent.run_forever() touches every cycle.
+          # 300s tolerates a slow poll (multiple incidents, multi-turn MCP
+          # calls to Confluence) without false-restarting a healthy pod.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/sre-agent-healthy) )) -lt 300"
+            initialDelaySeconds: 20
+            periodSeconds: 60
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+      volumes:
+        - name: tmp
+          emptyDir: {}

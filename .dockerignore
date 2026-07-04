@@ -1,0 +1,12 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+.git/
+.gitignore
+.env
+*.db
+k8s/
+README.md
+.claude/

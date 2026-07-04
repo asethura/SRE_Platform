@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: sre-platform
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - deployment-triage.yaml
+  - deployment-diagnosis.yaml
+  - deployment-remediation.yaml
+  - deployment-validation.yaml
+  - job-seed.yaml
+  # secret.example.yaml is intentionally NOT listed here — create the real
+  # `sre-secrets` object yourself (see the comment in that file).
+
+images:
+  - name: sre-platform
+    newName: your-registry/sre-platform
+    newTag: latest

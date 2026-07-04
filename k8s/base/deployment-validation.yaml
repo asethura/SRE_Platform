@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-validation
+  namespace: sre-platform
+  labels:
+    app: sre-platform
+    agent: validation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-platform
+      agent: validation
+  template:
+    metadata:
+      labels:
+        app: sre-platform
+        agent: validation
+    spec:
+      containers:
+        - name: validation
+          image: sre-platform:latest
+          args: ["validation"]
+          envFrom:
+            - configMapRef:
+                name: sre-config
+            - secretRef:
+                name: sre-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/sre-agent-healthy) )) -lt 300"
+            initialDelaySeconds: 20
+            periodSeconds: 60
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+      volumes:
+        - name: tmp
+          emptyDir: {}

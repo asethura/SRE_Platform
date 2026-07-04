@@ -1,0 +1,38 @@
+# Run-once bootstrap: creates the agent_criteria rows (the orchestration
+# contract every agent's find_work() matches against) and the playbooks
+# table. Without this, no agent has any entry criteria and nothing polls
+# anything. NOT idempotent — db/seed.py inserts fixed-id Playbook rows and
+# fresh AgentCriteria rows, so re-running this Job against an
+# already-seeded database will fail on duplicate Playbook primary keys (and
+# would duplicate AgentCriteria rows if that insert were reached first).
+# Delete the completed Job before reapplying if you intend to reseed.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sre-seed
+  namespace: sre-platform
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: sre-platform:latest
+          command: ["python", "-c"]
+          args:
+            - |
+              import os
+              from db.models import get_engine, init_db
+              from db.seed import seed
+              seed(init_db(get_engine(os.environ["DATABASE_URL"])))
+          envFrom:
+            - configMapRef:
+                name: sre-config
+            - secretRef:
+                name: sre-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true

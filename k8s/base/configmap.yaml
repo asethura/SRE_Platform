@@ -1,0 +1,20 @@
+# Non-secret configuration shared by all four agent Deployments.
+# ANTHROPIC_API_KEY, DATABASE_URL, and CONFLUENCE_MCP_TOKEN are secrets —
+# see secret.example.yaml for the fields and the `kubectl create secret`
+# command to actually create them (never commit real values here).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-config
+  namespace: sre-platform
+data:
+  SRE_MODEL: "claude-sonnet-4-6"
+  SRE_POLL_INTERVAL: "5"
+  SRE_HEALTHCHECK_FILE: "/tmp/sre-agent-healthy"
+  # Confluence MCP server endpoint (not sensitive — it's just a URL).
+  CONFLUENCE_MCP_URL: "https://your-confluence-mcp-server.example.com/mcp"
+  # "stub" replays the same fixed demo tickets forever — fine for a smoke
+  # test, wrong for a real cluster. Set to "null" until a real ITSM client
+  # is wired into integrations/itsm.py and added to run_agent.py's
+  # ITSM_CLIENTS map, otherwise triage will have nothing to do.
+  SRE_ITSM_CLIENT: "null"
