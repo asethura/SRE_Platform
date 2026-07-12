@@ -89,7 +89,7 @@ docker push your-registry/sre-platform:latest
 Postgres in-cluster. SQLite is a single-file DB and multiple pods writing to
 it concurrently will corrupt it; swap the URL, nothing else changes
 (`db/models.get_engine()` already accepts any SQLAlchemy URL, and
-`requirements.txt` already has `psycopg2-binary`).
+`requirements.txt` already has `psycopg[binary]`).
 
 **3. Create the secret** (never commit real values — see
 `k8s/base/secret.example.yaml` for the fields):

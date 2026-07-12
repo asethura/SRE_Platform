@@ -6,6 +6,7 @@ namespace: sre-platform
 resources:
   - namespace.yaml
   - configmap.yaml
+  - postgres.yaml
   - deployment-triage.yaml
   - deployment-diagnosis.yaml
   - deployment-remediation.yaml
@@ -16,5 +17,5 @@ resources:
 
 images:
   - name: sre-platform
-    newName: your-registry/sre-platform
+    newName: us-central1-docker.pkg.dev/project-40306309-d32d-4628-9f6/sre-platform/sre-platform
     newTag: latest
