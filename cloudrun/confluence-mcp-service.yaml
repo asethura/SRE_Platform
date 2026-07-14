@@ -1,0 +1,61 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: confluence-mcp
+  labels:
+    cloud.googleapis.com/location: us-central1
+spec:
+  template:
+    metadata:
+      annotations:
+        # nginx is the public ingress container; it depends on mcp-atlassian
+        # being up first, and reaches it over localhost (Cloud Run sidecars
+        # share a network namespace, same as containers in one k8s pod).
+        run.googleapis.com/container-dependencies: '{"nginx":["mcp-atlassian"]}'
+    spec:
+      containers:
+        - name: nginx
+          image: us-central1-docker.pkg.dev/project-40306309-d32d-4628-9f6/sre-platform/confluence-mcp-nginx-gate:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MCP_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: confluence-mcp-auth-secret
+                  key: "latest"
+          startupProbe:
+            httpGet:
+              path: /
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 5
+        - name: mcp-atlassian
+          image: ghcr.io/sooperset/mcp-atlassian:latest
+          args: ["--transport", "streamable-http", "--port", "9000", "-vv"]
+          env:
+            - name: ALLOW_GLOBAL_CRED_FALLBACK
+              value: "true"
+            - name: JIRA_URL
+              value: "https://asethura.atlassian.net"
+            - name: JIRA_USERNAME
+              value: "asethura@gmail.com"
+            - name: CONFLUENCE_URL
+              value: "https://asethura-1783715591922.atlassian.net/wiki"
+            - name: CONFLUENCE_USERNAME
+              value: "asethura@gmail.com"
+            - name: JIRA_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: atlassian-classic-api-token
+                  key: "latest"
+            - name: CONFLUENCE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: atlassian-classic-api-token
+                  key: "latest"
+          startupProbe:
+            tcpSocket:
+              port: 9000
+            failureThreshold: 5
+            periodSeconds: 5

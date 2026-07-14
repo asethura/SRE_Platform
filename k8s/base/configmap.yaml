@@ -12,7 +12,13 @@ data:
   SRE_POLL_INTERVAL: "5"
   SRE_HEALTHCHECK_FILE: "/tmp/sre-agent-healthy"
   # Confluence MCP server endpoint (not sensitive — it's just a URL).
-  CONFLUENCE_MCP_URL: "https://your-confluence-mcp-server.example.com/mcp"
+  # Self-hosted (cloudrun/confluence-mcp/) — nginx auth gate + mcp-atlassian
+  # bundled into one image, deployed to Cloud Run (see project README for the
+  # deploy command). Stable URL, doesn't change across revisions/restarts
+  # (unlike the Cloudflare quick-tunnel approach tried first, which
+  # Anthropic's MCP connector couldn't reliably reach — likely due to
+  # anonymous *.trycloudflare.com hostnames being untrusted/rate-limited).
+  CONFLUENCE_MCP_URL: "https://confluence-mcp-831242687401.us-central1.run.app/mcp"
   # "stub" replays the same fixed demo tickets forever — fine for a smoke
   # test, wrong for a real cluster. "jira" pulls real open requests from
   # Jira Cloud Service Management (see JIRA_* keys below and

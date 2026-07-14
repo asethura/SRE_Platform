@@ -1,0 +1,20 @@
+server {
+    listen 8080;
+    location / {
+        if ($http_authorization != "Bearer ${MCP_AUTH_SECRET}") {
+            return 401;
+        }
+        # mcp-atlassian treats an incoming Authorization header as a
+        # per-request end-user Atlassian OAuth token to forward to
+        # Atlassian ("multi-user" mode) -- it is NOT meant to see our own
+        # gate secret. Strip it after the check above passes so it falls
+        # back to its own server-side CONFLUENCE_API_TOKEN/JIRA_API_TOKEN
+        # (see ALLOW_GLOBAL_CRED_FALLBACK on the mcp-atlassian container).
+        proxy_set_header Authorization "";
+        proxy_pass http://127.0.0.1:9000;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+    }
+}
