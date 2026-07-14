@@ -106,3 +106,24 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: postgres-data
+---
+# External LoadBalancer for direct outside-the-cluster access (e.g. psql,
+# DBeaver). Kept as a SEPARATE Service from "postgres" above so in-cluster
+# DATABASE_URL (host "postgres", ClusterIP) is unaffected by this. GKE's
+# cloud controller auto-manages a firewall rule scoped to
+# loadBalancerSourceRanges — no manual gcloud firewall-rules command needed.
+# Update this list (and re-apply) if the allowed source IP changes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-external
+  namespace: sre-platform
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+    - "76.253.171.249/32"
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
