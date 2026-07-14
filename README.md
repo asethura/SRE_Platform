@@ -119,14 +119,18 @@ Job is **not idempotent**; re-applying after it already succeeded will fail
 on duplicate Playbook rows — delete the completed Job first if you mean to
 reseed.
 
-**Before this reaches real traffic:** `SRE_ITSM_CLIENT` currently only
-supports `stub` (replays 3 fixed demo tickets forever) or `null` (no
-intake at all — incidents only arrive via whatever creates `Incident` rows
-directly, e.g. a webhook handler you add). The ConfigMap defaults to `null`
-so a fresh cluster doesn't spin on fake tickets. Wire up a real PagerDuty/
-Datadog client against the `ITSMClient` contract in `integrations/itsm.py`,
-register it in `run_agent.py`'s `ITSM_CLIENTS` map, and point
-`SRE_ITSM_CLIENT` at it.
+**ITSM intake:** `SRE_ITSM_CLIENT` supports `stub` (replays 3 fixed demo
+tickets forever), `null` (no intake at all — incidents only arrive via
+whatever creates `Incident` rows directly, e.g. a webhook handler you add),
+or `jira` (pulls real open requests from **Jira Cloud Service Management**
+via `JiraServiceManagementITSMClient` in `integrations/itsm.py`, using the
+enhanced JQL search API and HTTP Basic auth with an email + API token). The
+ConfigMap defaults to `null` so a fresh cluster doesn't spin on fake
+tickets. To enable Jira: set `JIRA_BASE_URL` and `JIRA_PROJECT_KEY` (or a
+custom `JIRA_JQL`) in `configmap.yaml`, add `JIRA_EMAIL`/`JIRA_API_TOKEN` to
+`sre-secrets` (see `secret.example.yaml`), and set `SRE_ITSM_CLIENT: "jira"`.
+For PagerDuty/Datadog instead, implement the same `ITSMClient` contract and
+register it in `run_agent.py`'s `ITSM_CLIENTS` map.
 
 **Liveness, not readiness:** these pods don't serve traffic (no Service
 needed), so there's no readiness probe — only a liveness probe that checks
