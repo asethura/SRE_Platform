@@ -1,152 +1,202 @@
 """
-Scenario injector — create a known-issue demo incident from a named scenario
-and drive it through the full pipeline (triage -> approval -> remediation ->
-validation), so you can simulate different conditions by switching one CLI
-argument instead of editing main.py.
+Fault injector — introduce a REAL fault on the Online Boutique app (same GKE
+cluster as sre-platform, namespace "default") so the already-running GCP
+agents have something genuine to find. This script does nothing else: no DB
+writes, no agent/LLM calls, no ticket filing — file the matching Jira
+Service Management incident yourself afterward so sre-triage picks it up.
+
+Four distinct, independently real fault mechanisms:
+
+  kill        Delete a running pod. Self-healing -- the Deployment
+              recreates it immediately. Any service.
+  scale-zero  Scale a deployment to 0 replicas -- a real outage that does
+              NOT self-heal. Any service. Undo with: restore <service> scale
+  bad-deploy  Patch the container image to a nonexistent tag
+              (ImagePullBackOff/CrashLoopBackOff) -- does NOT self-heal.
+              Any service. Undo with: restore <service> deploy
+  cpu-stress  Exec a bounded CPU-burn loop inside the pod. paymentservice
+              only -- it's the one Online Boutique image with a shell and a
+              runtime (Node) available; the others are shell-less compiled
+              binaries you can't exec anything else into. Self-ending after
+              --duration seconds.
 
 Usage:
     python inject_scenario.py --list
-    python inject_scenario.py hpa_scale_up
-    python inject_scenario.py db_pool_exhaustion --no-approve
-    python inject_scenario.py hpa_scale_up bad_deploy_restart   # run several in sequence
+    python inject_scenario.py kill checkoutservice
+    python inject_scenario.py scale-zero cartservice
+    python inject_scenario.py bad-deploy productcatalogservice
+    python inject_scenario.py cpu-stress --duration 45
+    python inject_scenario.py restore cartservice scale
+    python inject_scenario.py restore productcatalogservice deploy
 
-Each scenario matches one of the seeded playbooks in db/seed.py (see
-README's "4 simple scenarios" for the mapping) — triage still has to find a
-matching Confluence runbook page for these to actually resolve as
-known_issue rather than falling through to diagnosis.
+Requires kubectl pointed at the online-boutique cluster:
+    gcloud container clusters get-credentials online-boutique \\
+        --project project-40306309-d32d-4628-9f6 --region us-central1
 
-Requires: ANTHROPIC_API_KEY (and CONFLUENCE_MCP_URL for real runbook
-matching) in env, same as main.py. --list needs neither.
+Note: RemediationAgent.execute_playbook() is currently stubbed (always
+"succeeds" without calling the Kubernetes API), so scale-zero and bad-deploy
+faults will NOT be auto-fixed by the pipeline yet -- restore them yourself
+with the `restore` subcommand.
 """
 
 import argparse
-import os
+import subprocess
 
-from dotenv import load_dotenv
+APP_NAMESPACE = "default"  # Online Boutique's namespace on the shared cluster
+CONTAINER_NAME = "server"  # container name inside every Online Boutique pod
+CPU_STRESS_SERVICE = "paymentservice"  # only service with a shell + runtime
+BAD_IMAGE = "gcr.io/google-samples/microservices-demo/does-not-exist:broken"
 
-import hitl
-from db.models import AgentCriteria, get_engine, init_db
-from db.seed import seed
-from agents.triage import TriageAgent
-from agents.diagnosis import DiagnosisAgent
-from agents.remediation import RemediationAgent
-from agents.validation import ValidationAgent
-from main import create_incident, poll_cycle, show, status_of
-
-SCENARIOS = {
-    "hpa_scale_up": dict(
-        title="Payment 5xx spike under load",
-        description="payment-service CPU pinned above 90%, 5xx error rate "
-                     "rising, pod count maxed at current HPA min replicas "
-                     "after a traffic spike",
-        service="payment-service", severity="P2", source="datadog",
-    ),
-    "db_pool_exhaustion": dict(
-        title="Orders service latency, pool exhausted",
-        description="orders-service latency climbing, logs show "
-                     "'connection pool exhausted: max=20 in_use=20', "
-                     "no recent deploy",
-        service="orders-service", severity="P2", source="datadog",
-    ),
-    "bad_deploy_restart": dict(
-        title="Orders service unhealthy after deploy",
-        description="orders-service intermittently returning 5xx since a "
-                     "deploy 20 minutes ago; prior incidents matching this "
-                     "pattern were fixed by a rolling restart",
-        service="orders-service", severity="P2", source="pagerduty",
-    ),
-    "hpa_scale_down": dict(
-        title="Payment service over-provisioned",
-        description="payment-service HPA min replicas still elevated from "
-                     "a manual override during last week's traffic event, "
-                     "event is long over, no user-facing symptom, cost "
-                     "review flagged it",
-        service="payment-service", severity="P4", source="manual",
-    ),
+# Real Online Boutique deployments (kubectl get deployments -n default) and a
+# one-line hint of the symptom each fault produces, for whoever files the
+# Jira ticket by hand afterward -- not used by this script otherwise.
+SERVICES = {
+    "adservice": "ads may fail to load intermittently until the new pod is ready",
+    "cartservice": "add-to-cart / view-cart requests may fail intermittently",
+    "checkoutservice": "checkout may be unavailable until the new pod is ready",
+    "currencyservice": "currency conversion may fail intermittently",
+    "emailservice": "order confirmation emails may be delayed or dropped",
+    "frontend": "the storefront may be briefly unavailable",
+    "paymentservice": "checkout payment step may fail with connection errors",
+    "productcatalogservice": "product listing/detail pages may fail intermittently",
+    "recommendationservice": "product recommendations may fail intermittently",
+    "redis-cart": "cart reads/writes may fail until the new pod is ready",
+    "shippingservice": "shipping cost/quote calls may fail intermittently",
 }
 
 
-def ensure_seeded(session_factory):
-    """seed() is not idempotent (duplicate Playbook rows) — only run it
-    once per DB, on first use, so repeated injector runs don't crash."""
-    db = session_factory()
-    try:
-        already_seeded = db.query(AgentCriteria).first() is not None
-    finally:
-        db.close()
-    if not already_seeded:
-        seed(session_factory)
+def _run(cmd: list[str]):
+    subprocess.run(cmd, check=True)
 
 
-def run(scenario: str, auto_approve: bool = True, poll_rounds: int = 10) -> str:
-    if scenario not in SCENARIOS:
-        raise SystemExit(
-            f"Unknown scenario '{scenario}'. Choices: {', '.join(SCENARIOS)}"
-        )
-
-    load_dotenv()
-    engine = get_engine(os.environ.get("DATABASE_URL", "sqlite:///sre_platform.db"))
-    session_factory = init_db(engine)
-    ensure_seeded(session_factory)
-
-    agents = [
-        TriageAgent(session_factory),
-        DiagnosisAgent(session_factory),
-        RemediationAgent(session_factory),
-        ValidationAgent(session_factory),
-    ]
-
-    print("=" * 70)
-    print(f"SCENARIO: {scenario}")
-    inc_id = create_incident(session_factory, **SCENARIOS[scenario])
-    print(f"  created {inc_id}")
-
-    poll_cycle(agents, max_rounds=poll_rounds)
-
-    if status_of(session_factory, inc_id) == "awaiting_approval":
-        if auto_approve:
-            hitl.approve(session_factory, inc_id, decided_by="oncall@company.com")
-            poll_cycle(agents, max_rounds=poll_rounds)
-        else:
-            print(f"  awaiting_approval — call hitl.approve(session_factory, "
-                  f"'{inc_id}', decided_by=...) to continue")
-            show(session_factory, inc_id)
-            return inc_id
-
-    show(session_factory, inc_id)
-    return inc_id
+def _pod_name(service: str) -> str:
+    pod = subprocess.run(
+        ["kubectl", "get", "pod", "-n", APP_NAMESPACE, "-l", f"app={service}",
+         "-o", "jsonpath={.items[0].metadata.name}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if not pod:
+        raise SystemExit(f"No running pod found for app={service} in {APP_NAMESPACE}")
+    return pod
 
 
-def _print_scenarios():
-    print("Available scenarios:")
-    for name, s in SCENARIOS.items():
-        print(f"  {name:20s} {s['service']:16s} {s['title']}")
+def _check_service(service: str):
+    if service not in SERVICES:
+        raise SystemExit(f"Unknown service '{service}'. Choices: {', '.join(SERVICES)}")
+
+
+# ---------------------------------------------------------------------- #
+# Faults
+# ---------------------------------------------------------------------- #
+
+def fault_kill(service: str):
+    _check_service(service)
+    pod = _pod_name(service)
+    _run(["kubectl", "delete", "pod", pod, "-n", APP_NAMESPACE, "--wait=false"])
+    print(f"  deleted {pod} -- deployment will recreate it (self-healing)")
+    print(f"  symptom: {SERVICES[service]}")
+
+
+def fault_scale_zero(service: str):
+    _check_service(service)
+    _run(["kubectl", "scale", f"deployment/{service}", "-n", APP_NAMESPACE, "--replicas=0"])
+    print(f"  scaled {service} to 0 replicas -- stays down until restored")
+    print(f"  symptom: {service} is fully unavailable")
+    print(f"  undo with: python inject_scenario.py restore {service} scale")
+
+
+def fault_bad_deploy(service: str):
+    _check_service(service)
+    _run(["kubectl", "set", "image", f"deployment/{service}",
+          f"{CONTAINER_NAME}={BAD_IMAGE}", "-n", APP_NAMESPACE])
+    print(f"  patched {service}'s image to a nonexistent tag")
+    print("  symptom: new pod stuck in ImagePullBackOff, old pod terminating -- "
+          "service degrades until restored")
+    print(f"  undo with: python inject_scenario.py restore {service} deploy")
+
+
+def fault_cpu_stress(duration: int):
+    pod = _pod_name(CPU_STRESS_SERVICE)
+    print(f"  burning CPU inside {pod} for {duration}s (blocks here until done)...")
+    _run(["kubectl", "exec", "-n", APP_NAMESPACE, pod, "--",
+          "node", "-e", f"const end=Date.now()+{duration}*1000; while(Date.now()<end){{}}"])
+    print("  done -- CPU pressure released")
+    print(f"  symptom: {SERVICES[CPU_STRESS_SERVICE]}")
+
+
+# ---------------------------------------------------------------------- #
+# Restore (scale-zero and bad-deploy don't self-heal)
+# ---------------------------------------------------------------------- #
+
+def restore_scale(service: str):
+    _check_service(service)
+    _run(["kubectl", "scale", f"deployment/{service}", "-n", APP_NAMESPACE, "--replicas=1"])
+    print(f"  scaled {service} back to 1 replica")
+
+
+def restore_deploy(service: str):
+    _check_service(service)
+    _run(["kubectl", "rollout", "undo", f"deployment/{service}", "-n", APP_NAMESPACE])
+    print(f"  rolled {service} back to its previous working image")
+
+
+def _print_services():
+    print("Available services:")
+    for name, symptom in SERVICES.items():
+        print(f"  {name:24s} {symptom}")
+    print(f"\ncpu-stress only runs against: {CPU_STRESS_SERVICE}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Inject one or more demo incidents and run them through "
-                     "the full triage -> approval -> remediation -> "
-                     "validation pipeline."
+        description="Inject a real fault onto the Online Boutique app."
     )
-    parser.add_argument("scenarios", nargs="*",
-                         help="Scenario name(s) to run, in order (see --list)")
     parser.add_argument("--list", action="store_true",
-                         help="List available scenarios and exit")
-    parser.add_argument("--no-approve", action="store_true",
-                         help="Stop at awaiting_approval instead of auto-approving")
-    parser.add_argument("--poll-rounds", type=int, default=10,
-                         help="Max poll rounds per scenario before giving up (default 10)")
+                         help="List available services and exit")
+    sub = parser.add_subparsers(dest="command")
+
+    p_kill = sub.add_parser("kill", help="Delete a pod (self-healing)")
+    p_kill.add_argument("service")
+
+    p_scale = sub.add_parser("scale-zero", help="Scale a deployment to 0 replicas")
+    p_scale.add_argument("service")
+
+    p_deploy = sub.add_parser("bad-deploy", help="Patch a deployment to a broken image")
+    p_deploy.add_argument("service")
+
+    p_cpu = sub.add_parser("cpu-stress", help=f"Burn CPU inside {CPU_STRESS_SERVICE}")
+    p_cpu.add_argument("--duration", type=int, default=45,
+                        help="Seconds to burn CPU for (default 45)")
+
+    p_restore = sub.add_parser("restore", help="Undo scale-zero or bad-deploy")
+    p_restore.add_argument("service")
+    p_restore.add_argument("fault", choices=["scale", "deploy"])
+
     args = parser.parse_args()
 
-    if args.list or not args.scenarios:
-        _print_scenarios()
-        if not args.scenarios:
-            print("\nUsage: python inject_scenario.py <scenario> [<scenario> ...]")
+    if args.list or not args.command:
+        _print_services()
+        if not args.command:
+            print("\nUsage: python inject_scenario.py <kill|scale-zero|bad-deploy|"
+                  "cpu-stress|restore> ...  (--help for details)")
         return
 
-    for scenario in args.scenarios:
-        run(scenario, auto_approve=not args.no_approve, poll_rounds=args.poll_rounds)
+    print("=" * 70)
+    print(f"FAULT: {args.command}")
+
+    if args.command == "kill":
+        fault_kill(args.service)
+    elif args.command == "scale-zero":
+        fault_scale_zero(args.service)
+    elif args.command == "bad-deploy":
+        fault_bad_deploy(args.service)
+    elif args.command == "cpu-stress":
+        fault_cpu_stress(args.duration)
+    elif args.command == "restore":
+        if args.fault == "scale":
+            restore_scale(args.service)
+        else:
+            restore_deploy(args.service)
 
 
 if __name__ == "__main__":
