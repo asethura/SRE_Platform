@@ -54,7 +54,14 @@ def poll_cycle(agents, max_rounds: int = 10):
     for _ in range(max_rounds):
         progressed = False
         for agent in agents:
-            picked = agent.poll_once()
+            try:
+                picked = agent.poll_once()
+            except Exception as e:
+                # Same catch-and-continue as run_forever() in production
+                # (agents/base.py) -- one bad incident (e.g. an MCP timeout)
+                # shouldn't kill the whole demo run.
+                print(f"  [{agent.agent_type.value}] error: {e}")
+                picked = []
             for r in picked:
                 print(f"  [{agent.agent_type.value}] processed {r['incident_id']}")
             progressed = progressed or bool(picked)
