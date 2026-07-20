@@ -4,8 +4,12 @@ Diagnosis Agent — deep root-cause analysis. Three outcomes (your diagram):
   root_cause_no_remediation   -> escalate to human (new runbook needed)
   unable_to_diagnose          -> escalate to human  (gap #5 fix)
 
-In production the observability functions below become MCP tool calls
-(Prometheus, ELK, Tempo, GitHub). Stubs keep the skeleton runnable.
+Reads logs and traces live via MCP (Cloud Logging = the "ELK" equivalent,
+Cloud Trace = the "Tempo" equivalent — neither is self-hosted here, see
+cloudrun/logging-mcp/ and cloudrun/trace-mcp/) and recent deploys/commits
+from GitHub's hosted MCP endpoint. fetch_metrics (Prometheus) is still a
+stub — wire it into the same prometheus-mcp server ValidationAgent already
+uses, next.
 
 Runbook candidates come live from Confluence via the MCP connector
 (mcp_servers()) — same as triage, no local runbooks table.
@@ -19,10 +23,16 @@ from db.models import (
     IncidentStatus,
     RiskTier,
 )
-from .base import BaseAgent, confluence_mcp_server
+from .base import (
+    BaseAgent,
+    confluence_mcp_server,
+    github_mcp_server,
+    logging_mcp_server,
+    trace_mcp_server,
+)
 
 
-# --- Observability stubs: swap for MCP clients ------------------------------
+# --- Still a stub: swap for the same prometheus-mcp server validation.py uses --
 
 def fetch_metrics(service: str) -> dict:
     """Prometheus MCP in production."""
@@ -30,38 +40,29 @@ def fetch_metrics(service: str) -> dict:
             "pod_restarts_last_hour": 4}
 
 
-def fetch_logs(service: str) -> list[str]:
-    """ELK MCP in production."""
-    return [
-        "ERROR connection pool exhausted: max=20 in_use=20",
-        "WARN request queue depth 340 exceeds threshold 100",
-        "ERROR upstream timeout calling stripe-api after 30s",
-    ]
-
-
-def fetch_traces(service: str) -> dict:
-    """Tempo MCP in production."""
-    return {"p99_ms": 8400, "slowest_span": "db.query users_by_account",
-            "span_error_pct": 12.5}
-
-
-def fetch_recent_deploys(service: str) -> list[dict]:
-    """GitHub MCP in production."""
-    return [{"sha": "a1b2c3d", "merged_at": "2h ago",
-             "title": "Reduce DB pool size to cut idle connections"}]
-
-
 class DiagnosisAgent(BaseAgent):
     agent_type = AgentType.DIAGNOSIS
 
     def mcp_servers(self) -> list[dict]:
-        return [confluence_mcp_server()]
+        return [
+            confluence_mcp_server(),
+            logging_mcp_server(),
+            trace_mcp_server(),
+            github_mcp_server(),
+        ]
 
     def system_prompt(self) -> str:
         return """You are the Diagnosis agent in an SRE incident-automation platform.
 Triage could not match this incident to a known pattern. Perform root-cause
-analysis using the observability data provided (metrics, logs, traces, recent
-deploys) plus the incident description and service topology.
+analysis using the incident description, service topology, and the metrics
+(pre-fetched below — still a stub, see fetch_metrics), plus tools to pull
+your own logs, traces, and recent deploys/commits live:
+- logging tools: search Cloud Logging for this service's recent errors/warnings.
+- trace tools: list/get recent traces for this service to spot slow or
+  failing spans.
+- github tools: check recent commits/PRs merged to this repo — a deploy
+  shortly before symptoms started is causation-shaped.
+- confluence tools: search for a runbook page once you have a root cause.
 
 Reason step by step internally, then commit to ONE outcome:
 - root_cause_with_remediation: you found the cause AND an existing runbook fixes it
@@ -97,9 +98,6 @@ Respond ONLY with JSON:
                 "service": svc, "severity": incident.severity,
             },
             "metrics": fetch_metrics(svc),
-            "recent_logs": fetch_logs(svc),
-            "traces": fetch_traces(svc),
-            "recent_deploys": fetch_recent_deploys(svc),
         }
 
     def apply_output(self, db, incident: Incident, output: dict) -> None:

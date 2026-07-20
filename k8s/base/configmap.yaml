@@ -19,6 +19,26 @@ data:
   # Anthropic's MCP connector couldn't reliably reach — likely due to
   # anonymous *.trycloudflare.com hostnames being untrusted/rate-limited).
   CONFLUENCE_MCP_URL: "https://confluence-mcp-831242687401.us-central1.run.app/mcp"
+  # Prometheus MCP server endpoint (not sensitive — it's just a URL). Same
+  # self-hosted pattern as Confluence above (cloudrun/prometheus-mcp/):
+  # nginx auth gate + our own FastMCP server bundled into one image on Cloud
+  # Run. Queries Google Managed Prometheus (already running on this cluster)
+  # via its Cloud Monitoring endpoint, authenticated with the Cloud Run
+  # service's own service account — not the PROMETHEUS_MCP_TOKEN, which is
+  # only the nginx gate secret (see secret.example.yaml).
+  PROMETHEUS_MCP_URL: "https://prometheus-mcp-831242687401.us-central1.run.app/mcp"
+  # Same self-hosted pattern, for Diagnosis's fetch_logs/fetch_traces (the
+  # "ELK"/"Tempo" equivalents — see cloudrun/logging-mcp/, cloudrun/trace-mcp/).
+  # Neither ELK nor Tempo is actually self-hosted here; both query GCP-native
+  # backends that already collect this cluster's data (Cloud Logging /
+  # Cloud Trace) instead of standing up a redundant pipeline.
+  LOGGING_MCP_URL: "https://logging-mcp-831242687401.us-central1.run.app/mcp"
+  TRACE_MCP_URL: "https://trace-mcp-831242687401.us-central1.run.app/mcp"
+  # GitHub's own hosted MCP endpoint (for fetch_recent_deploys) — not
+  # self-hosted; the open-source github-mcp-server binary only speaks
+  # stdio, no HTTP mode to bundle behind nginx like the servers above.
+  # GITHUB_MCP_TOKEN (a PAT scoped to just this repo) is in sre-secrets.
+  GITHUB_MCP_URL: "https://api.githubcopilot.com/mcp/"
   # "stub" replays the same fixed demo tickets forever — fine for a smoke
   # test, wrong for a real cluster. "jira" pulls real open requests from
   # Jira Cloud Service Management (see JIRA_* keys below and

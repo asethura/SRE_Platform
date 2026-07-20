@@ -179,9 +179,13 @@ agent; raise it deliberately.
 
 ## Swapping stubs for production
 
-1. **Observability** — replace `fetch_metrics/logs/traces/deploys` in
-   `diagnosis.py` and `fetch_post_fix_metrics` in `validation.py` with
-   Prometheus / ELK / Tempo / GitHub MCP clients.
+1. **Observability** — `validation.py` reads live Prometheus metrics via the
+   MCP connector (`PROMETHEUS_MCP_URL`, see `cloudrun/prometheus-mcp/` —
+   queries Google Managed Prometheus, same bundled nginx-gate + Cloud Run
+   pattern as Confluence). `diagnosis.py`'s `fetch_metrics/logs/traces/deploys`
+   are still stubs — point `fetch_metrics` at the same Prometheus MCP server
+   next, then swap `fetch_logs/traces/deploys` for ELK / Tempo / GitHub MCP
+   clients.
 2. **Playbook executor** — replace `execute_playbook()` with real Kubernetes
    API / HTTP calls per `Playbook.executor`.
 3. **KB retrieval** — done: triage/diagnosis/remediation search and fetch

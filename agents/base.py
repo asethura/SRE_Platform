@@ -18,13 +18,17 @@ Concrete agents implement: system_prompt(), build_context(), apply_output().
 Optional hooks: eligible() (extra dispatch gate), on_claim() (status marker).
 """
 
+import asyncio
 import json
 import os
 import time
 import uuid
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 
 import anthropic
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 from sqlalchemy.exc import IntegrityError
 
 from db.models import (
@@ -46,12 +50,13 @@ HEALTHCHECK_FILE = os.environ.get("SRE_HEALTHCHECK_FILE", "/tmp/sre-agent-health
 
 # Confluence MCP server — runbooks and KB articles live there, not in this
 # DB. Agents that need them declare mcp_servers() -> [confluence_mcp_server()]
-# and run_llm() gives Claude the actual search/fetch tools via the MCP
-# connector (server-side; Anthropic makes the connection, not this process).
+# and run_llm() connects to it directly (client-side): THIS process is the
+# MCP client, not Anthropic's infrastructure. Claude only ever returns a
+# tool_use request; _call_with_mcp_tools() below is what actually executes
+# it, so every tool call is mediated, loggable, and gateable in our own code.
 CONFLUENCE_MCP_URL = os.environ.get("CONFLUENCE_MCP_URL", "")
 CONFLUENCE_MCP_TOKEN = os.environ.get("CONFLUENCE_MCP_TOKEN")
-MCP_BETA = "mcp-client-2025-11-20"
-MAX_MCP_TURNS = 8  # pause_turn resumption cap — avoid an unbounded tool loop
+MAX_TOOL_TURNS = 8  # cap on tool-use round trips — avoid an unbounded loop
 
 
 def confluence_mcp_server() -> dict:
@@ -60,10 +65,154 @@ def confluence_mcp_server() -> dict:
             "CONFLUENCE_MCP_URL is not set — required for agents that read "
             "runbooks/KB articles from Confluence."
         )
-    server = {"type": "url", "url": CONFLUENCE_MCP_URL, "name": "confluence"}
+    server = {"url": CONFLUENCE_MCP_URL, "name": "confluence"}
     if CONFLUENCE_MCP_TOKEN:
         server["authorization_token"] = CONFLUENCE_MCP_TOKEN
     return server
+
+
+# Prometheus MCP server (gap #4) — Validation reads post-fix metrics from
+# Google Managed Prometheus this way instead of a stub. See
+# cloudrun/prometheus-mcp/ for the server this URL points at.
+PROMETHEUS_MCP_URL = os.environ.get("PROMETHEUS_MCP_URL", "")
+PROMETHEUS_MCP_TOKEN = os.environ.get("PROMETHEUS_MCP_TOKEN")
+
+
+def prometheus_mcp_server() -> dict:
+    if not PROMETHEUS_MCP_URL:
+        raise RuntimeError(
+            "PROMETHEUS_MCP_URL is not set — required for agents that read "
+            "metrics from Prometheus."
+        )
+    server = {"url": PROMETHEUS_MCP_URL, "name": "prometheus"}
+    if PROMETHEUS_MCP_TOKEN:
+        server["authorization_token"] = PROMETHEUS_MCP_TOKEN
+    return server
+
+
+# Cloud Logging MCP server — the "ELK" equivalent for Diagnosis's fetch_logs.
+# See cloudrun/logging-mcp/.
+LOGGING_MCP_URL = os.environ.get("LOGGING_MCP_URL", "")
+LOGGING_MCP_TOKEN = os.environ.get("LOGGING_MCP_TOKEN")
+
+
+def logging_mcp_server() -> dict:
+    if not LOGGING_MCP_URL:
+        raise RuntimeError(
+            "LOGGING_MCP_URL is not set — required for agents that read "
+            "logs from Cloud Logging."
+        )
+    server = {"url": LOGGING_MCP_URL, "name": "logging"}
+    if LOGGING_MCP_TOKEN:
+        server["authorization_token"] = LOGGING_MCP_TOKEN
+    return server
+
+
+# Cloud Trace MCP server — the "Tempo" equivalent for Diagnosis's
+# fetch_traces. See cloudrun/trace-mcp/.
+TRACE_MCP_URL = os.environ.get("TRACE_MCP_URL", "")
+TRACE_MCP_TOKEN = os.environ.get("TRACE_MCP_TOKEN")
+
+
+def trace_mcp_server() -> dict:
+    if not TRACE_MCP_URL:
+        raise RuntimeError(
+            "TRACE_MCP_URL is not set — required for agents that read "
+            "traces from Cloud Trace."
+        )
+    server = {"url": TRACE_MCP_URL, "name": "trace"}
+    if TRACE_MCP_TOKEN:
+        server["authorization_token"] = TRACE_MCP_TOKEN
+    return server
+
+
+# GitHub MCP server — for Diagnosis's fetch_recent_deploys. GitHub's own
+# hosted endpoint (not self-hosted — the open-source github-mcp-server
+# binary only speaks stdio, no HTTP mode to bundle behind nginx like the
+# others). Auth is a plain PAT via Bearer header, same as any other server
+# here — our own agent code still mediates every tool call either way.
+GITHUB_MCP_URL = os.environ.get("GITHUB_MCP_URL", "https://api.githubcopilot.com/mcp/")
+GITHUB_MCP_TOKEN = os.environ.get("GITHUB_MCP_TOKEN")
+
+
+def github_mcp_server() -> dict:
+    if not GITHUB_MCP_TOKEN:
+        raise RuntimeError(
+            "GITHUB_MCP_TOKEN is not set — required for agents that read "
+            "recent deploys/commits from GitHub."
+        )
+    return {"url": GITHUB_MCP_URL, "name": "github", "authorization_token": GITHUB_MCP_TOKEN}
+
+
+async def _call_with_mcp_tools(client, servers, system, user_message, model,
+                                max_tokens, max_turns, log_prefix):
+    """Client-side tool-use loop: THIS process connects to each MCP server,
+    discovers its tools, hands Claude plain tool definitions, and executes
+    every tool_use request itself before feeding the result back. Claude
+    never touches the MCP server directly — this function is the mediation
+    point for logging/rate-limiting/authorization."""
+    async with AsyncExitStack() as stack:
+        sessions_by_tool: dict[str, ClientSession] = {}
+        anthropic_tools = []
+        for server in servers:
+            headers = None
+            if server.get("authorization_token"):
+                headers = {"Authorization": f"Bearer {server['authorization_token']}"}
+            read, write, _ = await stack.enter_async_context(
+                streamablehttp_client(server["url"], headers=headers)
+            )
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            listed = await session.list_tools()
+            for tool in listed.tools:
+                sessions_by_tool[tool.name] = session
+                anthropic_tools.append({
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": tool.inputSchema,
+                })
+
+        messages = [user_message]
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens, system=system,
+            tools=anthropic_tools, messages=messages,
+        )
+        turns = 0
+        while response.stop_reason == "tool_use" and turns < max_turns:
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+                print(f"    [{log_prefix}] tool call: {block.name}({block.input})")
+                session = sessions_by_tool.get(block.name)
+                if session is None:
+                    tool_results.append({
+                        "type": "tool_result", "tool_use_id": block.id,
+                        "content": f"error: unknown tool {block.name}",
+                        "is_error": True,
+                    })
+                    continue
+                try:
+                    result = await session.call_tool(block.name, block.input)
+                    text = "".join(c.text for c in result.content if c.type == "text")
+                    tool_results.append({
+                        "type": "tool_result", "tool_use_id": block.id,
+                        "content": text, "is_error": bool(result.isError),
+                    })
+                except Exception as e:
+                    tool_results.append({
+                        "type": "tool_result", "tool_use_id": block.id,
+                        "content": f"error calling {block.name}: {e}",
+                        "is_error": True,
+                    })
+            messages.append({"role": "user", "content": tool_results})
+            response = client.messages.create(
+                model=model, max_tokens=max_tokens, system=system,
+                tools=anthropic_tools, messages=messages,
+            )
+            turns += 1
+        return response
 
 
 class BaseAgent:
@@ -242,38 +391,12 @@ class BaseAgent:
                 messages=[user_message],
             )
         else:
-            # Agentic MCP loop: Claude decides when/how to search or fetch
-            # pages via the connected MCP server(s). The connector executes
-            # the tool calls server-side; we only need to resume on
-            # pause_turn (the server's own iteration cap), same shape as any
-            # other server-side tool.
-            tools = [
-                {"type": "mcp_toolset", "mcp_server_name": s["name"]}
-                for s in servers
-            ]
-            messages = [user_message]
-            response = self.client.beta.messages.create(
-                model=MODEL,
-                max_tokens=2000,
-                betas=[MCP_BETA],
-                system=self.system_prompt(),
-                mcp_servers=servers,
-                tools=tools,
-                messages=messages,
-            )
-            turns = 1
-            while response.stop_reason == "pause_turn" and turns < MAX_MCP_TURNS:
-                messages.append({"role": "assistant", "content": response.content})
-                response = self.client.beta.messages.create(
-                    model=MODEL,
-                    max_tokens=2000,
-                    betas=[MCP_BETA],
-                    system=self.system_prompt(),
-                    mcp_servers=servers,
-                    tools=tools,
-                    messages=messages,
-                )
-                turns += 1
+            # Client-side tool loop — this process is the MCP client, not
+            # Anthropic's infrastructure. See _call_with_mcp_tools().
+            response = asyncio.run(_call_with_mcp_tools(
+                self.client, servers, self.system_prompt(), user_message,
+                MODEL, 2000, MAX_TOOL_TURNS, self.instance_id,
+            ))
 
         text = "".join(b.text for b in response.content if b.type == "text")
         text = text.replace("```json", "").replace("```", "").strip()

@@ -5,30 +5,31 @@ Pass -> resolve incident, close ITSM ticket
 Fail -> route BACK to diagnosis with execution context (gap #1 fix:
         validation reject is no longer a dead end)
 
-Needs its own observability access (gap #4 fix) — same MCP toolbox as
-diagnosis, smaller scope. Stubs here.
+Reads post-fix metrics live from Google Managed Prometheus via the MCP
+connector (gap #4 fix) — mcp_servers() gives the model query/query_range/
+list_metric_names tools, same shape as Confluence for triage/diagnosis.
 """
 
 from datetime import datetime, timezone
 
 from db.models import AgentType, Incident, IncidentStatus
-from .base import BaseAgent
-
-
-def fetch_post_fix_metrics(service: str) -> dict:
-    """Prometheus MCP in production. Simulates healthy post-fix state."""
-    return {"cpu_pct": 41, "error_rate_5xx": 0.001,
-            "pod_restarts_last_hour": 0, "p99_ms": 220,
-            "observation_window_minutes": 15}
+from .base import BaseAgent, prometheus_mcp_server
 
 
 class ValidationAgent(BaseAgent):
     agent_type = AgentType.VALIDATION
 
+    def mcp_servers(self) -> list[dict]:
+        return [prometheus_mcp_server()]
+
     def system_prompt(self) -> str:
         return """You are the Validation agent in an SRE incident-automation platform.
-Remediation just finished. Compare post-fix metrics against the incident's
-original symptoms and the service health thresholds provided.
+Remediation just finished. Use your Prometheus tools to query post-fix metrics
+for this incident's service and compare them against its original symptoms and
+the health thresholds provided. Call list_metric_names first if you're unsure
+what's available, then query/query_range for the specific signals relevant to
+the original symptom (e.g. CPU, 5xx rate, restart count, p99 latency) over the
+observation window.
 
 Rules:
 - Declare "pass" only if the ORIGINAL symptom is gone AND no new symptom appeared.
@@ -48,7 +49,6 @@ Respond ONLY with JSON:
             "incident": {"id": incident.id, "title": incident.title,
                          "description": incident.description,
                          "service": incident.service},
-            "post_fix_metrics": fetch_post_fix_metrics(incident.service or ""),
             "health_thresholds": {
                 "error_rate_5xx_max": 0.01,
                 "cpu_pct_max": 80,
