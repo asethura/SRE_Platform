@@ -43,7 +43,10 @@ import argparse
 import subprocess
 
 APP_NAMESPACE = "default"  # Online Boutique's namespace on the shared cluster
-CONTAINER_NAME = "server"  # container name inside every Online Boutique pod
+# Container name inside each Online Boutique pod -- "server" for every
+# service except redis-cart, which runs the stock redis:alpine image.
+DEFAULT_CONTAINER_NAME = "server"
+CONTAINER_NAMES = {"redis-cart": "redis"}
 CPU_STRESS_SERVICE = "paymentservice"  # only service with a shell + runtime
 BAD_IMAGE = "gcr.io/google-samples/microservices-demo/does-not-exist:broken"
 
@@ -107,8 +110,9 @@ def fault_scale_zero(service: str):
 
 def fault_bad_deploy(service: str):
     _check_service(service)
+    container = CONTAINER_NAMES.get(service, DEFAULT_CONTAINER_NAME)
     _run(["kubectl", "set", "image", f"deployment/{service}",
-          f"{CONTAINER_NAME}={BAD_IMAGE}", "-n", APP_NAMESPACE])
+          f"{container}={BAD_IMAGE}", "-n", APP_NAMESPACE])
     print(f"  patched {service}'s image to a nonexistent tag")
     print("  symptom: new pod stuck in ImagePullBackOff, old pod terminating -- "
           "service degrades until restored")
