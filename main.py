@@ -2,8 +2,9 @@
 Demo runner — walks three incidents through the platform, one per triage exit:
 
   1. Non-issue        (maintenance window alert)     -> closed by triage
-  2. Known issue      (matches KB-041 / RB-012)      -> approval -> remediation -> validation -> resolved
-  3. Unknown issue    (novel symptom)                -> diagnosis -> (runbook found) -> approval -> ...
+  2. Known issue      (matches KB-041)  -> remediation planning -> gate 2 approval -> execute -> validation -> resolved
+  3. Unknown issue    (novel symptom)                -> diagnosis -> gate 1 approval -> remediation
+                                                          planning -> gate 2 approval -> execute -> ...
 
 No orchestrator: every agent polls the shared session DB for work matching
 its entry criteria. The demo drives poll cycles synchronously so the output
@@ -43,7 +44,7 @@ def show(session_factory, incident_id):
         inc = db.get(Incident, incident_id)
         print(f"  => {inc.id} | status={inc.status.value} "
               f"| triage={inc.triage_verdict.value if inc.triage_verdict else '-'} "
-              f"| runbook={inc.matched_runbook_id or '-'}\n")
+              f"| root_cause={(inc.root_cause or '-')[:60]}\n")
     finally:
         db.close()
 
@@ -104,7 +105,8 @@ def main():
 
     # ---- Scenario 2: known issue ------------------------------------------
     print("=" * 70)
-    print("SCENARIO 2 — known pattern (expected: approval -> remediation -> resolved)")
+    print("SCENARIO 2 — known pattern (expected: remediation planning -> "
+          "gate 2 approval -> execute -> resolved; skips gate 1, no diagnosis)")
     inc2 = create_incident(
         session_factory,
         title="Payment 5xx spike",
@@ -113,14 +115,15 @@ def main():
         service="payment-service", severity="P2", source="pagerduty",
     )
     poll_cycle(agents)
-    if status_of(session_factory, inc2) == "awaiting_approval":
+    if status_of(session_factory, inc2) == "awaiting_remediation_approval":
         hitl.approve(session_factory, inc2, decided_by="oncall@company.com")  # <- your UI calls this
         poll_cycle(agents)
     show(session_factory, inc2)
 
     # ---- Scenario 3: unknown issue ----------------------------------------
     print("=" * 70)
-    print("SCENARIO 3 — novel symptom (expected: diagnosis -> approval or escalated)")
+    print("SCENARIO 3 — novel symptom (expected: diagnosis -> gate 1 -> "
+          "remediation planning -> gate 2 -> resolved, or escalated)")
     inc3 = create_incident(
         session_factory,
         title="Checkout timeouts",
@@ -129,8 +132,11 @@ def main():
         service="payment-service", severity="P1", source="pagerduty",
     )
     poll_cycle(agents)
-    if status_of(session_factory, inc3) == "awaiting_approval":
-        hitl.approve(session_factory, inc3, decided_by="oncall@company.com")
+    if status_of(session_factory, inc3) == "awaiting_diagnosis_approval":
+        hitl.approve(session_factory, inc3, decided_by="oncall@company.com")  # gate 1: root cause + steps
+        poll_cycle(agents)
+    if status_of(session_factory, inc3) == "awaiting_remediation_approval":
+        hitl.approve(session_factory, inc3, decided_by="oncall@company.com")  # gate 2: exact playbook mapping
         poll_cycle(agents)
     show(session_factory, inc3)
 

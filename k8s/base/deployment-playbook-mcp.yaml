@@ -1,0 +1,88 @@
+# Discovery-only MCP gateway over the `playbooks` table (see
+# playbook-mcp/server.py). Deployed in-cluster (unlike the other
+# cloudrun/*-mcp/ servers) specifically so it can reach the same
+# `postgres` Service/DATABASE_URL secret the agents already use, instead
+# of exposing the DB externally for a Cloud Run deployment -- see the plan
+# doc for the full reasoning.
+#
+# Probes use tcpSocket, not httpGet: every request (including a health
+# check) goes through nginx's bearer-auth gate first, so an unauthenticated
+# httpGet would get a 401 and be treated as unhealthy. A bare TCP connect
+# still proves nginx is up and accepting connections.
+#
+# securityContext is deliberately NOT hardened to readOnlyRootFilesystem/
+# runAsNonRoot here, unlike every agent Deployment -- nginx:alpine's stock
+# entrypoint needs a writable filesystem (pid file, client body temp dirs)
+# and typically starts as root to bind and drop privileges for workers;
+# doing this safely needs emptyDir mounts for nginx's runtime dirs and
+# hasn't been verified against a real cluster yet. Worth tightening once
+# this is actually deployed and tested.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playbook-mcp
+  namespace: sre-platform
+  labels:
+    app: sre-platform
+    component: playbook-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-platform
+      component: playbook-mcp
+  template:
+    metadata:
+      labels:
+        app: sre-platform
+        component: playbook-mcp
+    spec:
+      containers:
+        - name: playbook-mcp
+          image: playbook-mcp:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: sre-secrets   # provides DATABASE_URL
+          env:
+            # nginx's template expects MCP_AUTH_SECRET; the client side
+            # (agents/base.py:playbook_mcp_server()) sends the same value
+            # as PLAYBOOK_MCP_TOKEN -- both names must resolve to one secret.
+            - name: MCP_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sre-secrets
+                  key: PLAYBOOK_MCP_TOKEN
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playbook-mcp
+  namespace: sre-platform
+spec:
+  selector:
+    app: sre-platform
+    component: playbook-mcp
+  ports:
+    - port: 8080
+      targetPort: 8080

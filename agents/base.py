@@ -144,6 +144,29 @@ def github_mcp_server() -> dict:
     return {"url": GITHUB_MCP_URL, "name": "github", "authorization_token": GITHUB_MCP_TOKEN}
 
 
+# Playbook discovery MCP server (playbook-mcp/) — lets RemediationAgent's
+# planning phase discover available playbooks live instead of relying only
+# on the DB-query catalog embedded in build_context(). Deliberately
+# read-only (list_playbooks/describe_playbook): the actual mutating
+# execution is a separate, non-MCP HTTP call (execute_playbook() in
+# agents/remediation.py, straight to PLAYBOOK_SERVER_URL) that no LLM
+# tool-use loop can ever reach — see playbook-mcp/server.py's docstring.
+PLAYBOOK_MCP_URL = os.environ.get("PLAYBOOK_MCP_URL", "")
+PLAYBOOK_MCP_TOKEN = os.environ.get("PLAYBOOK_MCP_TOKEN")
+
+
+def playbook_mcp_server() -> dict:
+    if not PLAYBOOK_MCP_URL:
+        raise RuntimeError(
+            "PLAYBOOK_MCP_URL is not set — required for remediation's "
+            "planning phase to discover playbooks."
+        )
+    server = {"url": PLAYBOOK_MCP_URL, "name": "playbook"}
+    if PLAYBOOK_MCP_TOKEN:
+        server["authorization_token"] = PLAYBOOK_MCP_TOKEN
+    return server
+
+
 async def _call_with_mcp_tools(client, servers, system, user_message, model,
                                 max_tokens, max_turns, log_prefix):
     """Client-side tool-use loop: THIS process connects to each MCP server,

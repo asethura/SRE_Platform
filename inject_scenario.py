@@ -5,10 +5,10 @@ agents have something genuine to find. This script does nothing else: no DB
 writes, no agent/LLM calls, no ticket filing — file the matching Jira
 Service Management incident yourself afterward so sre-triage picks it up.
 
-Four distinct, independently real fault mechanisms:
+Three distinct, independently real fault mechanisms — all non-self-healing
+(or long enough to matter), so the pipeline's remediation has to actually do
+something to resolve them:
 
-  kill        Delete a running pod. Self-healing -- the Deployment
-              recreates it immediately. Any service.
   scale-zero  Scale a deployment to 0 replicas -- a real outage that does
               NOT self-heal. Any service. Undo with: restore <service> scale
   bad-deploy  Patch the container image to a nonexistent tag
@@ -22,7 +22,6 @@ Four distinct, independently real fault mechanisms:
 
 Usage:
     python inject_scenario.py --list
-    python inject_scenario.py kill checkoutservice
     python inject_scenario.py scale-zero cartservice
     python inject_scenario.py bad-deploy productcatalogservice
     python inject_scenario.py cpu-stress --duration 45
@@ -33,10 +32,13 @@ Requires kubectl pointed at the online-boutique cluster:
     gcloud container clusters get-credentials online-boutique \\
         --project project-40306309-d32d-4628-9f6 --region us-central1
 
-Note: RemediationAgent.execute_playbook() is currently stubbed (always
-"succeeds" without calling the Kubernetes API), so scale-zero and bad-deploy
-faults will NOT be auto-fixed by the pipeline yet -- restore them yourself
-with the `restore` subcommand.
+Note: RemediationAgent.execute_playbook() POSTs to playbook-server
+(k8s/base/deployment-playbook-server.yaml), which genuinely calls the
+Kubernetes API -- scale_hpa/scale_deployment/rolling_restart really mutate
+the cluster, with capture-before-mutate restore semantics (see
+playbook-server/app.py). So scale-zero and bad-deploy CAN be auto-fixed by
+the pipeline now; the `restore` subcommand here is just a manual fallback
+if you'd rather not wait on/trust the pipeline.
 """
 
 import argparse
@@ -91,14 +93,6 @@ def _check_service(service: str):
 # ---------------------------------------------------------------------- #
 # Faults
 # ---------------------------------------------------------------------- #
-
-def fault_kill(service: str):
-    _check_service(service)
-    pod = _pod_name(service)
-    _run(["kubectl", "delete", "pod", pod, "-n", APP_NAMESPACE, "--wait=false"])
-    print(f"  deleted {pod} -- deployment will recreate it (self-healing)")
-    print(f"  symptom: {SERVICES[service]}")
-
 
 def fault_scale_zero(service: str):
     _check_service(service)
@@ -159,9 +153,6 @@ def main():
                          help="List available services and exit")
     sub = parser.add_subparsers(dest="command")
 
-    p_kill = sub.add_parser("kill", help="Delete a pod (self-healing)")
-    p_kill.add_argument("service")
-
     p_scale = sub.add_parser("scale-zero", help="Scale a deployment to 0 replicas")
     p_scale.add_argument("service")
 
@@ -181,16 +172,14 @@ def main():
     if args.list or not args.command:
         _print_services()
         if not args.command:
-            print("\nUsage: python inject_scenario.py <kill|scale-zero|bad-deploy|"
+            print("\nUsage: python inject_scenario.py <scale-zero|bad-deploy|"
                   "cpu-stress|restore> ...  (--help for details)")
         return
 
     print("=" * 70)
     print(f"FAULT: {args.command}")
 
-    if args.command == "kill":
-        fault_kill(args.service)
-    elif args.command == "scale-zero":
+    if args.command == "scale-zero":
         fault_scale_zero(args.service)
     elif args.command == "bad-deploy":
         fault_bad_deploy(args.service)

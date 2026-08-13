@@ -1,0 +1,79 @@
+# The only component in this platform that calls the real Kubernetes API
+# (see playbook-server/app.py). Runs with its own narrowly-scoped
+# ServiceAccount (playbook-server-rbac.yaml) instead of the agents'
+# envFrom-only, no-cluster-access pattern.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playbook-server
+  namespace: sre-platform
+  labels:
+    app: sre-platform
+    component: playbook-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-platform
+      component: playbook-server
+  template:
+    metadata:
+      labels:
+        app: sre-platform
+        component: playbook-server
+    spec:
+      serviceAccountName: playbook-server
+      containers:
+        - name: playbook-server
+          image: playbook-server:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PLAYBOOK_SERVER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sre-secrets
+                  key: PLAYBOOK_SERVER_TOKEN
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playbook-server
+  namespace: sre-platform
+spec:
+  selector:
+    app: sre-platform
+    component: playbook-server
+  ports:
+    - port: 8080
+      targetPort: 8080

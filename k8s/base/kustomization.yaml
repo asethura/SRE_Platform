@@ -12,10 +12,19 @@ resources:
   - deployment-remediation.yaml
   - deployment-validation.yaml
   - job-seed.yaml
+  - playbook-server-rbac.yaml
+  - deployment-playbook-server.yaml
+  - deployment-playbook-mcp.yaml
   # secret.example.yaml is intentionally NOT listed here — create the real
   # `sre-secrets` object yourself (see the comment in that file).
 
 images:
   - name: sre-platform
     newName: us-central1-docker.pkg.dev/project-40306309-d32d-4628-9f6/sre-platform/sre-platform
+    newTag: latest
+  - name: playbook-server
+    newName: us-central1-docker.pkg.dev/project-40306309-d32d-4628-9f6/sre-platform/playbook-server
+    newTag: latest
+  - name: playbook-mcp
+    newName: us-central1-docker.pkg.dev/project-40306309-d32d-4628-9f6/sre-platform/playbook-mcp
     newTag: latest

@@ -1,0 +1,49 @@
+# playbook-server's identity + the narrow permissions it needs to actually
+# remediate Online Boutique. No RBAC objects existed anywhere in this repo
+# before this -- every other Deployment runs with default (i.e. no)
+# Kubernetes API access, since they only ever talk to the DB and external
+# MCP URLs. This is the first component that touches the K8s API directly.
+#
+# The ServiceAccount lives in sre-platform (where the pod runs); the Role
+# and RoleBinding live in `default` (Online Boutique's namespace, where the
+# Deployments/HPAs actually are) -- a deliberate cross-namespace binding,
+# scoped as tightly as the seeded playbooks require: get+patch on
+# Deployments and HorizontalPodAutoscalers, get+list on ReplicaSets (PB-017
+# rollback_deployment needs to read revision history -- see
+# playbook-server/app.py's deployments_rollback()), nothing cluster-wide, no
+# delete/create/list-across-namespaces.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: playbook-server
+  namespace: sre-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: playbook-server
+  namespace: default
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: playbook-server
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: playbook-server
+    namespace: sre-platform
+roleRef:
+  kind: Role
+  name: playbook-server
+  apiGroup: rbac.authorization.k8s.io

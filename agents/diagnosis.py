@@ -1,8 +1,7 @@
 """
-Diagnosis Agent — deep root-cause analysis. Three outcomes (your diagram):
-  root_cause_with_remediation -> attach runbook -> approval -> remediation
-  root_cause_no_remediation   -> escalate to human (new runbook needed)
-  unable_to_diagnose          -> escalate to human  (gap #5 fix)
+Diagnosis Agent — deep root-cause analysis. Two outcomes:
+  diagnosed            -> root cause + remediation steps -> gate 1 approval
+  unable_to_diagnose   -> escalate to human
 
 Reads logs and traces live via MCP (Cloud Logging = the "ELK" equivalent,
 Cloud Trace = the "Tempo" equivalent — neither is self-hosted here, see
@@ -11,21 +10,23 @@ from GitHub's hosted MCP endpoint. fetch_metrics (Prometheus) is still a
 stub — wire it into the same prometheus-mcp server ValidationAgent already
 uses, next.
 
-Runbook candidates come live from Confluence via the MCP connector
-(mcp_servers()) — same as triage, no local runbooks table.
+No Confluence here — diagnosis reasons out its own root cause AND its own
+free-text remediation steps (no runbook to search for or cite). A human
+approves that reasoning (Approval.stage=DIAGNOSIS) before remediation's
+planning phase maps the steps onto the playbook catalog and asks for a
+second approval (Approval.stage=REMEDIATION) to execute them.
 """
 
 from db.models import (
     Approval,
+    ApprovalStage,
     AgentType,
     DiagnosisOutcome,
     Incident,
     IncidentStatus,
-    RiskTier,
 )
 from .base import (
     BaseAgent,
-    confluence_mcp_server,
     github_mcp_server,
     logging_mcp_server,
     trace_mcp_server,
@@ -45,7 +46,6 @@ class DiagnosisAgent(BaseAgent):
 
     def mcp_servers(self) -> list[dict]:
         return [
-            confluence_mcp_server(),
             logging_mcp_server(),
             trace_mcp_server(),
             github_mcp_server(),
@@ -62,30 +62,28 @@ your own logs, traces, and recent deploys/commits live:
   failing spans.
 - github tools: check recent commits/PRs merged to this repo — a deploy
   shortly before symptoms started is causation-shaped.
-- confluence tools: search for a runbook page once you have a root cause.
 
 Reason step by step internally, then commit to ONE outcome:
-- root_cause_with_remediation: you found the cause AND an existing runbook fixes it
-- root_cause_no_remediation: you found the cause but no runbook covers it
-- unable_to_diagnose: evidence is insufficient or contradictory
+- diagnosed: you found the root cause AND can state concrete remediation
+  steps to fix it
+- unable_to_diagnose: evidence is insufficient or contradictory, OR you
+  found a cause but genuinely cannot state a fix for it
 
 Correlate signals: a deploy 2h ago + errors starting 2h ago is causation-shaped.
 
-Once you have a root cause, use your Confluence tools to search for a runbook
-page covering it (by service name and by root-cause keywords). Never invent a
-runbook_id — only cite a page you actually found, and read its risk tier
-(low/medium/high) exactly as stated on the page; never guess it. If you find
-a root cause but no runbook page covers it, that's root_cause_no_remediation.
+If you commit to "diagnosed", state your remediation_steps as plain,
+concrete actions (e.g. "scale the deployment back to its previous replica
+count", "restart the pods", "raise the DB connection pool limit") — a human
+will review this reasoning, and then a separate step maps these steps onto
+an approved catalog of executable actions. Do not reference playbook ids or
+any specific automation mechanism; just state what should happen.
 
 Respond ONLY with JSON:
 {
-  "outcome": "root_cause_with_remediation" | "root_cause_no_remediation" | "unable_to_diagnose",
+  "outcome": "diagnosed" | "unable_to_diagnose",
   "root_cause": "concise statement or null",
   "evidence": ["signal 1", "signal 2", ...],
-  "runbook_id": "confluence page id, or null",
-  "runbook_name": "runbook page title, or null",
-  "runbook_risk_tier": "low" | "medium" | "high" | null,
-  "suggested_fix": "free-text fix suggestion when no runbook exists, else null",
+  "remediation_steps": ["step 1", "step 2", ...] or null,
   "confidence": 0.0-1.0
 }"""
 
@@ -102,33 +100,30 @@ Respond ONLY with JSON:
 
     def apply_output(self, db, incident: Incident, output: dict) -> None:
         outcome = DiagnosisOutcome(output["outcome"])
+
+        root_cause = output.get("root_cause")
+        steps = output.get("remediation_steps")
+        if outcome == DiagnosisOutcome.DIAGNOSED and (not root_cause or not steps):
+            # Claimed a diagnosis but couldn't state both a cause and
+            # concrete steps — degrade safely rather than hand gate 1
+            # nothing to review.
+            outcome = DiagnosisOutcome.UNABLE_TO_DIAGNOSE
+
         incident.diagnosis_outcome = outcome
 
-        if outcome == DiagnosisOutcome.ROOT_CAUSE_WITH_REMEDIATION:
-            runbook_id = output.get("runbook_id")
-            risk_tier_raw = output.get("runbook_risk_tier")
-            risk_tier = RiskTier(risk_tier_raw) if risk_tier_raw in {t.value for t in RiskTier} else None
-            if not runbook_id or risk_tier is None:
-                # Claimed a fix but couldn't cite a runbook page with an
-                # explicit risk tier — escalate rather than guess.
-                incident.status = IncidentStatus.ESCALATED
-                return
-
-            runbook_name = output.get("runbook_name") or runbook_id
-            incident.matched_runbook_id = runbook_id
-            incident.matched_runbook_name = runbook_name
-            incident.matched_runbook_risk_tier = risk_tier
-            incident.status = IncidentStatus.AWAITING_APPROVAL
+        if outcome == DiagnosisOutcome.DIAGNOSED:
+            incident.root_cause = root_cause
+            incident.remediation_steps = steps
+            incident.status = IncidentStatus.AWAITING_DIAGNOSIS_APPROVAL
             db.add(Approval(
                 incident_id=incident.id,
-                runbook_id=runbook_id,
+                stage=ApprovalStage.DIAGNOSIS,
                 summary=(
-                    f"Diagnosis: {output.get('root_cause')} | "
-                    f"Runbook {runbook_id} ({runbook_name}) | "
-                    f"risk: {risk_tier.value}"
+                    f"Root cause: {root_cause} | "
+                    f"Proposed steps: {'; '.join(steps)}"
                 ),
             ))
         else:
-            # Both no-remediation and unable-to-diagnose escalate to a human.
-            # Feedback loop later turns these into new runbooks / KB articles.
+            # unable_to_diagnose escalates to a human.
+            # Feedback loop later turns these into new KB articles.
             incident.status = IncidentStatus.ESCALATED

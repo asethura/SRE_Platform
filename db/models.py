@@ -13,12 +13,13 @@ Tables:
   feedback         — human feedback on wrong agent conclusions
   resource_locks   — prevents two remediation instances touching same service
 
-Runbooks and KB articles are NOT tables here — they live in Confluence.
-Triage/diagnosis/remediation agents reach them live via the Confluence MCP
-server (see agents/base.py: confluence_mcp_server(), BaseAgent.mcp_servers()).
-Only the identifiers and risk tier the model extracts from a matched
-Confluence page are persisted, on Incident/Approval, for audit and so
-remediation doesn't have to re-derive risk tier from scratch.
+KB articles (for triage's classification only) live in Confluence, reached
+live via the Confluence MCP server (see agents/base.py:
+confluence_mcp_server(), BaseAgent.mcp_servers()). There are no runbook
+documents anywhere: diagnosis reasons out its own root cause + remediation
+steps, and remediation independently maps those steps onto the `playbooks`
+catalog — both are reviewed by a human (Approval.stage: DIAGNOSIS then
+REMEDIATION) before anything executes.
 """
 
 import enum
@@ -60,9 +61,10 @@ class Base(DeclarativeBase):
 class IncidentStatus(str, enum.Enum):
     NEW = "new"
     TRIAGING = "triaging"
-    AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_DIAGNOSIS_APPROVAL = "awaiting_diagnosis_approval"    # gate 1: root cause + steps
+    AWAITING_REMEDIATION_APPROVAL = "awaiting_remediation_approval"  # gate 2: exact playbook mapping
     DIAGNOSING = "diagnosing"
-    REMEDIATING = "remediating"
+    REMEDIATING = "remediating"   # triage known_issue fast path -> remediation planning (no gate 1)
     VALIDATING = "validating"
     RESOLVED = "resolved"
     CLOSED_NON_ISSUE = "closed_non_issue"
@@ -94,13 +96,12 @@ class RunStatus(str, enum.Enum):
 
 class TriageVerdict(str, enum.Enum):
     NON_ISSUE = "non_issue"
-    KNOWN_ISSUE = "known_issue"       # runbook exists -> remediation
+    KNOWN_ISSUE = "known_issue"       # KB confirms a known fix -> remediation planning (no gate 1)
     UNKNOWN_ISSUE = "unknown_issue"   # -> diagnosis
 
 
 class DiagnosisOutcome(str, enum.Enum):
-    ROOT_CAUSE_WITH_REMEDIATION = "root_cause_with_remediation"
-    ROOT_CAUSE_NO_REMEDIATION = "root_cause_no_remediation"
+    DIAGNOSED = "diagnosed"                # root cause + remediation steps found -> gate 1
     UNABLE_TO_DIAGNOSE = "unable_to_diagnose"
 
 
@@ -108,6 +109,11 @@ class ApprovalStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class ApprovalStage(str, enum.Enum):
+    DIAGNOSIS = "diagnosis"        # gate 1: root cause + free-text remediation steps
+    REMEDIATION = "remediation"    # gate 2: exact playbook-id + params mapping
 
 
 class RiskTier(str, enum.Enum):
@@ -137,13 +143,13 @@ class Incident(Base):
     triage_verdict = Column(Enum(TriageVerdict), nullable=True)
     diagnosis_outcome = Column(Enum(DiagnosisOutcome), nullable=True)
 
-    # Runbook match — the runbook itself lives in Confluence; only the
-    # Confluence page id + what triage/diagnosis extracted from it are kept
-    # here, so remediation has an authoritative risk_tier without needing to
-    # re-fetch and re-judge the page itself.
-    matched_runbook_id = Column(String, nullable=True)
-    matched_runbook_name = Column(String, nullable=True)
-    matched_runbook_risk_tier = Column(Enum(RiskTier), nullable=True)
+    # Remediation reasoning — set by whichever agent hands off into
+    # remediation's planning phase: diagnosis (after its own root-cause
+    # analysis) or triage (its known_issue KB match). Free text, no
+    # runbook/document reference — remediation.py's planning phase maps
+    # these onto the playbook catalog itself.
+    root_cause = Column(Text, nullable=True)
+    remediation_steps = Column(JSON, nullable=True)   # list[str]
 
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
@@ -228,14 +234,20 @@ class Playbook(Base):
 # ---------------------------------------------------------------------------
 
 class Approval(Base):
-    """Single approval gate at runbook level before remediation executes."""
+    """Two approval gates, distinguished by `stage`:
+      DIAGNOSIS   — reviews root cause + free-text remediation steps
+      REMEDIATION — reviews the exact playbook-id + params mapping of those
+                    steps (proposed_plan), before anything executes
+    """
     __tablename__ = "approvals"
 
     id = Column(String, primary_key=True, default=lambda: new_id("APR"))
     incident_id = Column(String, ForeignKey("incidents.id"), nullable=False)
-    runbook_id = Column(String, nullable=False)     # Confluence page id — no local runbooks table
+    stage = Column(Enum(ApprovalStage), nullable=False)
     status = Column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING, index=True)
     summary = Column(Text)                          # what human sees: fix, risk, ETA
+    proposed_plan = Column(JSON, nullable=True)      # REMEDIATION stage only: the execution_plan
+    risk_tier = Column(Enum(RiskTier), nullable=True)  # REMEDIATION stage only: max tier across executed steps
     decided_by = Column(String, nullable=True)
     decided_at = Column(DateTime, nullable=True)
     reject_reason = Column(Text, nullable=True)

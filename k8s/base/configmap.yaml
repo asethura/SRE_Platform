@@ -1,6 +1,6 @@
 # Non-secret configuration shared by all four agent Deployments.
-# ANTHROPIC_API_KEY, DATABASE_URL, and CONFLUENCE_MCP_TOKEN are secrets —
-# see secret.example.yaml for the fields and the `kubectl create secret`
+# ANTHROPIC_API_KEY, DATABASE_URL, and *_TOKEN values are secrets — see
+# secret.example.yaml for the fields and the `kubectl create secret`
 # command to actually create them (never commit real values here).
 apiVersion: v1
 kind: ConfigMap
@@ -39,6 +39,19 @@ data:
   # stdio, no HTTP mode to bundle behind nginx like the servers above.
   # GITHUB_MCP_TOKEN (a PAT scoped to just this repo) is in sre-secrets.
   GITHUB_MCP_URL: "https://api.githubcopilot.com/mcp/"
+  # Playbook server (playbook-server/, in-cluster, its own ServiceAccount —
+  # see playbook-server-rbac.yaml) — remediation.execute_playbook() POSTs
+  # each executed step's params to "{PLAYBOOK_SERVER_URL}{Playbook.endpoint}"
+  # (a relative path, e.g. /apis/apps/v1/deployments/scale — see
+  # db/seed.py). It's the only component that calls the real Kubernetes API.
+  PLAYBOOK_SERVER_URL: "http://playbook-server.sre-platform.svc.cluster.local:8080"
+  # Playbook discovery MCP server (playbook-mcp/, in-cluster — see the plan
+  # doc for why this one deviates from the Cloud Run pattern above: it needs
+  # live DATABASE_URL access to the `playbooks` table). Read-only
+  # (list_playbooks/describe_playbook) — RemediationAgent's planning phase
+  # uses it to discover what's available; actual execution never goes
+  # through this server, only through PLAYBOOK_SERVER_URL above.
+  PLAYBOOK_MCP_URL: "http://playbook-mcp.sre-platform.svc.cluster.local:8080/mcp"
   # "stub" replays the same fixed demo tickets forever — fine for a smoke
   # test, wrong for a real cluster. "jira" pulls real open requests from
   # Jira Cloud Service Management (see JIRA_* keys below and
