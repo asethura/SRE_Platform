@@ -277,6 +277,30 @@ class Feedback(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
+class LLMCall(Base):
+    """One row per raw Claude API call (client.messages.create()) — full
+    request/response, for debugging what an agent actually saw and said.
+    An agent's tool-use loop (see agents/base.py:_call_with_mcp_tools) makes
+    several of these per AgentRun, one per turn."""
+    __tablename__ = "llm_calls"
+
+    id = Column(String, primary_key=True, default=lambda: new_id("LLM"))
+    agent_run_id = Column(String, ForeignKey("agent_runs.id"), nullable=False, index=True)
+    agent_type = Column(Enum(AgentType), nullable=False)
+    turn = Column(Integer, nullable=False)          # 0-indexed position in the tool-use loop
+    model = Column(String, nullable=False)
+    system_prompt = Column(Text, nullable=False)
+    tools = Column(JSON, nullable=True)              # tool schemas offered this call, if any
+    input_messages = Column(JSON, nullable=False)   # exact `messages` list sent
+    response_content = Column(JSON, nullable=False)  # exact content blocks returned
+    response_text = Column(Text, nullable=True)      # text blocks only, concatenated
+    stop_reason = Column(String, nullable=True)
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    cost_usd = Column(Float, nullable=True)   # computed from input/output_tokens at insert time
+    created_at = Column(DateTime, default=utcnow)
+
+
 class ResourceLock(Base):
     """Prevents two remediation instances mutating the same service."""
     __tablename__ = "resource_locks"

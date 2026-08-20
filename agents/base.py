@@ -37,11 +37,43 @@ from db.models import (
     AgentRun,
     AgentType,
     Incident,
+    IncidentStatus,
+    LLMCall,
     RunStatus,
 )
 
 MODEL = os.environ.get("SRE_MODEL", "claude-sonnet-4-6")
 POLL_INTERVAL = float(os.environ.get("SRE_POLL_INTERVAL", "2"))
+
+# $/1M tokens (input, output) — first-party Anthropic API rates. Used only to
+# compute LLMCall.cost_usd for observability; not billing-authoritative.
+# Update if SRE_MODEL changes to a model not listed here.
+MODEL_PRICING_PER_MTOK = {
+    "claude-fable-5": (10.00, 50.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-opus-4-7": (5.00, 25.00),
+    "claude-opus-4-6": (5.00, 25.00),
+    "claude-sonnet-5": (3.00, 15.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+}
+
+
+def _compute_cost_usd(model: str, input_tokens, output_tokens):
+    rates = MODEL_PRICING_PER_MTOK.get(model)
+    if rates is None or input_tokens is None or output_tokens is None:
+        return None
+    input_rate, output_rate = rates
+    return (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
+
+# Cap on consecutive failures (same agent, same incident) before giving up
+# and escalating to a human instead of retrying forever. A failure that's
+# going to recur (bad MCP creds, a model that can't produce valid JSON for
+# this input) would otherwise retry every POLL_INTERVAL seconds indefinitely
+# — each retry re-spending a full LLM call (or, with MCP tools, up to
+# MAX_TOOL_TURNS calls) for no new outcome.
+MAX_CONSECUTIVE_FAILURES = int(os.environ.get("SRE_MAX_CONSECUTIVE_FAILURES", "3"))
 
 # Heartbeat file for run_forever() — a Kubernetes liveness probe checks this
 # file's mtime (see k8s/base/deployment-*.yaml) since this is a background
@@ -167,8 +199,21 @@ def playbook_mcp_server() -> dict:
     return server
 
 
+def _json_safe(value):
+    """Recursively convert a messages/content structure (a mix of plain
+    dicts and Anthropic SDK pydantic objects) into something JSON-
+    serializable, for persisting to LLMCall.input_messages/response_content."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    return value
+
+
 async def _call_with_mcp_tools(client, servers, system, user_message, model,
-                                max_tokens, max_turns, log_prefix):
+                                max_tokens, max_turns, log_prefix, log_call):
     """Client-side tool-use loop: THIS process connects to each MCP server,
     discovers its tools, hands Claude plain tool definitions, and executes
     every tool_use request itself before feeding the result back. Claude
@@ -181,7 +226,7 @@ async def _call_with_mcp_tools(client, servers, system, user_message, model,
             headers = None
             if server.get("authorization_token"):
                 headers = {"Authorization": f"Bearer {server['authorization_token']}"}
-            read, write, _ = await stack.enter_async_context(
+            read, write, _get_session_id = await stack.enter_async_context(
                 streamablehttp_client(server["url"], headers=headers)
             )
             session = await stack.enter_async_context(ClientSession(read, write))
@@ -200,6 +245,7 @@ async def _call_with_mcp_tools(client, servers, system, user_message, model,
             model=model, max_tokens=max_tokens, system=system,
             tools=anthropic_tools, messages=messages,
         )
+        log_call(0, anthropic_tools, messages, response)
         turns = 0
         while response.stop_reason == "tool_use" and turns < max_turns:
             messages.append({"role": "assistant", "content": response.content})
@@ -235,6 +281,18 @@ async def _call_with_mcp_tools(client, servers, system, user_message, model,
                 tools=anthropic_tools, messages=messages,
             )
             turns += 1
+            log_call(turns, anthropic_tools, messages, response)
+
+        if response.stop_reason == "tool_use":
+            # Cut off at max_turns mid tool-call: response.content has no
+            # text block at all, so letting this through would make run_llm()
+            # try to json.loads("") and fail with a cryptic "Expecting
+            # value: line 1 column 1 (char 0)" that looks nothing like the
+            # real problem.
+            raise RuntimeError(
+                f"[{log_prefix}] tool loop exhausted after {max_turns} turns "
+                "without a final answer"
+            )
         return response
 
 
@@ -345,6 +403,23 @@ class BaseAgent:
     def on_claim(self, db, incident: Incident) -> None:
         """Optional in-flight marker hook (e.g. triage sets TRIAGING)."""
 
+    def _consecutive_failures(self, db, incident_id: str, exclude_run_id: str) -> int:
+        """FAILED runs by this agent on this incident since the last
+        COMPLETED run (or since the beginning, if none) — walked newest
+        first and stopped at the first non-FAILED row. `exclude_run_id`
+        keeps the run currently being failed out of its own count."""
+        runs = (db.query(AgentRun)
+                .filter(AgentRun.incident_id == incident_id,
+                        AgentRun.agent_type == self.agent_type,
+                        AgentRun.id != exclude_run_id)
+                .order_by(AgentRun.started_at.desc()).all())
+        count = 0
+        for r in runs:
+            if r.status != RunStatus.FAILED:
+                break
+            count += 1
+        return count
+
     def process(self, incident_id: str) -> dict | None:
         """Full lifecycle for one incident. Returns the structured output."""
         run = self.claim(incident_id)
@@ -362,7 +437,7 @@ class BaseAgent:
             run.input_context = context
             db.commit()
 
-            output = self.run_llm(context)
+            output = self.run_llm(context, run.id)
 
             self.apply_output(db, incident, output)
 
@@ -378,8 +453,22 @@ class BaseAgent:
             run = db.get(AgentRun, run.id)
             run.status = RunStatus.FAILED
             run.error = str(e)
-            run.active_claim = None  # free the claim so a retry can happen
             run.completed_at = datetime.now(timezone.utc)
+
+            failures = self._consecutive_failures(db, incident_id, run.id) + 1
+            if failures >= MAX_CONSECUTIVE_FAILURES:
+                # This failure is likely to recur (bad creds, a model that
+                # can't produce valid output for this input, ...) — leaving
+                # the claim free would just let the next poll retry it
+                # again in POLL_INTERVAL seconds, forever. Escalate instead
+                # of burning an LLM call every cycle with no new outcome.
+                incident = db.get(Incident, incident_id)
+                incident.status = IncidentStatus.ESCALATED
+                run.active_claim = None
+                print(f"[{self.instance_id}] {incident_id} escalated after "
+                      f"{failures} consecutive {self.agent_type.value} failures: {e}")
+            else:
+                run.active_claim = None  # free the claim so a retry can happen
             db.commit()
             raise
         finally:
@@ -394,7 +483,37 @@ class BaseAgent:
         Default: none — plain single-turn call."""
         return []
 
-    def run_llm(self, context: dict) -> dict:
+    def _log_llm_call(self, run_id: str, turn: int, model: str, system: str,
+                       tools: list, messages: list, response) -> None:
+        """Best-effort persistence of one raw client.messages.create() call —
+        a logging failure must never fail the agent's actual work."""
+        db = self.session_factory()
+        try:
+            text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+            input_tokens = getattr(response.usage, "input_tokens", None)
+            output_tokens = getattr(response.usage, "output_tokens", None)
+            db.add(LLMCall(
+                agent_run_id=run_id,
+                agent_type=self.agent_type,
+                turn=turn,
+                model=model,
+                system_prompt=system,
+                tools=_json_safe(tools) if tools else None,
+                input_messages=_json_safe(messages),
+                response_content=_json_safe(response.content),
+                response_text=text,
+                stop_reason=response.stop_reason,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=_compute_cost_usd(model, input_tokens, output_tokens),
+            ))
+            db.commit()
+        except Exception as e:
+            print(f"[{self.instance_id}] failed to log LLM call: {e}")
+        finally:
+            db.close()
+
+    def run_llm(self, context: dict, run_id: str) -> dict:
         user_message = {
             "role": "user",
             "content": (
@@ -404,26 +523,57 @@ class BaseAgent:
                   "instructions. No preamble, no markdown fences."
             ),
         }
+        system = self.system_prompt()
 
         servers = self.mcp_servers()
         if not servers:
             response = self.client.messages.create(
                 model=MODEL,
                 max_tokens=2000,
-                system=self.system_prompt(),
+                system=system,
                 messages=[user_message],
             )
+            self._log_llm_call(run_id, 0, MODEL, system, [], [user_message], response)
         else:
             # Client-side tool loop — this process is the MCP client, not
             # Anthropic's infrastructure. See _call_with_mcp_tools().
+            log_call = lambda turn, tools, messages, resp: self._log_llm_call(
+                run_id, turn, MODEL, system, tools, messages, resp
+            )
             response = asyncio.run(_call_with_mcp_tools(
-                self.client, servers, self.system_prompt(), user_message,
-                MODEL, 2000, MAX_TOOL_TURNS, self.instance_id,
+                self.client, servers, system, user_message,
+                MODEL, 2000, MAX_TOOL_TURNS, self.instance_id, log_call,
             ))
 
         text = "".join(b.text for b in response.content if b.type == "text")
         text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        if not text:
+            # The model ended its turn (stop_reason != "tool_use", so the
+            # guard above didn't fire) but produced no text block at all —
+            # e.g. it gave up after repeated tool errors (bad MCP creds)
+            # instead of still returning the required JSON verdict. Fail
+            # with the real cause instead of json.loads("")'s cryptic
+            # "Expecting value: line 1 column 1 (char 0)".
+            raise RuntimeError(
+                f"[{self.instance_id}] model returned no text content "
+                f"(stop_reason={response.stop_reason!r}) — check for MCP "
+                "tool errors upstream (e.g. expired Confluence credentials)"
+            )
+        # Despite "no preamble" in every system prompt, the model sometimes
+        # narrates its reasoning before the JSON object anyway (seen after
+        # long tool-call chains, e.g. triage explaining an exhaustive KB
+        # search before its verdict). Extract the {...} span instead of
+        # assuming the whole response is JSON, so a stray sentence doesn't
+        # fail the run.
+        start, end = text.find("{"), text.rfind("}")
+        json_text = text[start:end + 1] if start != -1 and end > start else text
+        try:
+            return json.loads(json_text)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"[{self.instance_id}] model response was not valid JSON: {e}\n"
+                f"response text: {text!r}"
+            ) from e
 
     # ------------------------------------------------------------------ #
     # To implement per agent

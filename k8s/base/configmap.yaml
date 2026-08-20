@@ -63,4 +63,4 @@ data:
   # JIRA_PROJECT_KEY for the default "all open requests in this project"
   # query, or override entirely with JIRA_JQL for anything more specific.
   JIRA_BASE_URL: "https://asethura.atlassian.net"
-  JIRA_PROJECT_KEY: "SUP"
+  JIRA_PROJECT_KEY: "ZPM"

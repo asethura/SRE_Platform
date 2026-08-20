@@ -162,7 +162,7 @@ class JiraServiceManagementITSMClient(ITSMClient):
         "low": Severity.P4, "lowest": Severity.P4,
     }
 
-    _INCIDENT_ISSUE_TYPE = "Submit a request or incident"
+    _INCIDENT_ISSUE_TYPE = "[System] Incident"
     
     def __init__(self, base_url: str, email: str, api_token: str,
                  project_key: str = None, jql: str = None, max_results: int = 50):
