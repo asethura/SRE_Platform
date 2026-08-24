@@ -25,6 +25,7 @@ sre-platform/
 ├── run_agent.py         # Deployment: one polling worker process per agent
 ├── main.py              # Demo: three incidents, one per triage exit
 ├── smoke_test.py        # Full pipeline test with mocked LLM (no API key)
+├── inject_scenario.py   # Fault injector for a live Online Boutique cluster (see below)
 ├── Dockerfile           # One image, agent type picked via CMD arg
 ├── playbook-server/     # Real Kubernetes API calls — the only thing that touches the live cluster
 ├── playbook-mcp/        # Discovery-only MCP gateway over the `playbooks` table (list/describe, no execution)
@@ -55,7 +56,11 @@ also no document to cite, and no free-form actions: every executed step
 must resolve to an entry in `playbooks`.
 
 This produces **two** approval gates instead of one, both enforced the same
-way (`RemediationAgent.eligible()`, `Approval.stage`):
+way (`RemediationAgent.eligible()`, `Approval.stage`). A gate checks the
+*latest* `Approval` row for its stage, not just whether any row was ever
+approved — a fresh row from a later diagnosis/remediation cycle (e.g. after
+a failed validation sends the incident back to diagnosis) must be reviewed
+on its own; an approval from an earlier cycle can't keep authorizing it:
 1. **Diagnosis gate** (`Approval.stage == DIAGNOSIS`) — a human reviews the
    root cause and proposed steps before remediation is allowed to plan
    anything. Triage's `known_issue` verdict skips this gate entirely (and
@@ -163,6 +168,15 @@ custom `JIRA_JQL`) in `configmap.yaml`, add `JIRA_EMAIL`/`JIRA_API_TOKEN` to
 For PagerDuty/Datadog instead, implement the same `ITSMClient` contract and
 register it in `run_agent.py`'s `ITSM_CLIENTS` map.
 
+**Ticket closure:** triage closes the ITSM ticket when it verdicts
+`non_issue`, and validation closes it when a remediation passes (both call
+`ITSMClient.close_ticket()`) — so `run_agent.py` wires an ITSM client into
+`ValidationAgent` as well as `TriageAgent`. `JiraServiceManagementITSMClient`
+resolves whichever of the issue's available transitions leads to a
+`statusCategory: done` status (workflow-agnostic — Jira status names aren't
+fixed across projects), preferring a non-cancel transition when more than
+one qualifies.
+
 **Liveness, not readiness:** these pods don't serve traffic (no Service
 needed), so there's no readiness probe — only a liveness probe that checks
 a heartbeat file `BaseAgent.run_forever()` touches every poll cycle
@@ -174,6 +188,28 @@ already make triage/diagnosis/remediation/validation safe to run with
 `replicas > 1` — that's the whole point of the choreography design (see
 below). Remediation defaults to 1 anyway since it's the highest-blast-radius
 agent; raise it deliberately.
+
+## Testing end-to-end against a live cluster
+
+`inject_scenario.py` introduces a REAL fault on a running Online Boutique app
+(same cluster as the deployed agents, namespace `default`) so the already-
+running pipeline has something genuine to find and fix — it makes no DB
+writes and doesn't touch the LLM or ITSM itself:
+
+```bash
+python inject_scenario.py --list                              # services + symptoms
+python inject_scenario.py bad-deploy productcatalogservice     # ImagePullBackOff, does not self-heal
+python inject_scenario.py scale-zero cartservice                # real outage, does not self-heal
+python inject_scenario.py cpu-stress --duration 45              # paymentservice only, self-ends
+python inject_scenario.py restore productcatalogservice deploy  # manual undo if you don't trust the pipeline
+```
+
+After injecting `scale-zero` or `bad-deploy`, file the matching ITSM ticket
+yourself (Jira Service Management, if `SRE_ITSM_CLIENT=jira`) so triage picks
+it up — the fault only exists in the cluster until something makes an
+`Incident` row for it. `bad-deploy` maps to `PB-017` (rollback_deployment),
+which the pipeline can execute and validate without any manual step once the
+two gates are approved.
 
 ## How coordination works without an orchestrator
 
@@ -222,7 +258,12 @@ agent; raise it deliberately.
    MCP servers. No more hardcoded `fetch_metrics()` stub — diagnosis's
    system prompt explicitly requires evidence to be checked against a
    provided `now` timestamp, since logging/trace tools can return
-   arbitrarily old results if a query isn't time-scoped.
+   arbitrarily old results if a query isn't time-scoped. Both prompts also
+   guard against citing/validating a specific pod by name: remediation
+   (rollback, restart, rescale) routinely replaces pods, so diagnosis must
+   confirm a pod is part of the CURRENT live set before citing it as
+   evidence, and validation must judge the service in aggregate, not a pod
+   instance that may already be gone.
 2. **Playbook executor** — done: `execute_playbook()` (`agents/remediation.py`)
    POSTs each executed step's params to `{PLAYBOOK_SERVER_URL}{Playbook.endpoint}`
    on a single playbook server, which owns the actual remediation mechanism
@@ -241,3 +282,24 @@ agent; raise it deliberately.
    LISTEN-NOTIFY later. Agents and the criteria table stay unchanged.
 6. **Models** — set `SRE_MODEL` env var; consider `claude-haiku-4-5-20251001`
    for triage/validation once stable, Sonnet for diagnosis/remediation.
+
+## Cost tracking and prompt caching
+
+Every LLM call is logged to `llm_calls` (`agent_type`, `turn`, prompts,
+response, token counts, `cost_usd`) — see `BaseAgent._log_llm_call()` in
+`agents/base.py`. System prompts and tool definitions are identical on every
+call a given agent type makes, so both get an ephemeral cache breakpoint
+(`_CACHE_CONTROL`); within one incident's own multi-turn MCP tool loop, a
+second breakpoint moves to the latest message each turn so the growing
+history isn't re-priced as fresh input every round trip. `cost_usd` prices
+cache writes and cache reads at Anthropic's published multipliers (1.25x and
+0.10x of the base input rate) so it doesn't silently under-report once
+caching is in effect — a plain `input_tokens * rate` calculation would miss
+most of the actual cost.
+
+A single agent's MCP tool-use loop is capped at `MAX_TOOL_TURNS` (default 8)
+round trips before giving up with a `RuntimeError` rather than looping
+forever — validation's stale-pod-aware prompts (above) are exploratory
+enough to occasionally need most of that budget. If the loop is cut off
+mid-tool-call, `agent_runs.error` records the real reason, not the
+underlying MCP transport's own asyncio cleanup noise.
