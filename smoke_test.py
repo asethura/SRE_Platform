@@ -103,7 +103,7 @@ print("PASS scenario 2: known issue -> planning -> gate 2 -> execute -> validati
 # Scenario 3: unknown -> diagnosis -> gate 1 -> planning -> gate 2 -> execute -> resolved
 i3 = mk(dict(title="Checkout timeouts", description="upstream timeout errors calling stripe api queue depth growing", service="payment-service"))
 responses = [MOCKS["triage_unknown"], MOCKS["diagnosis"]]
-with patch("agents.base.BaseAgent.run_llm", side_effect=lambda ctx: responses.pop(0)):
+with patch("agents.base.BaseAgent.run_llm", side_effect=lambda ctx, run_id: responses.pop(0)):
     poll_cycle()
 assert status_of(i3) == "awaiting_diagnosis_approval", status_of(i3)
 

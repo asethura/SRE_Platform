@@ -60,12 +60,26 @@ MODEL_PRICING_PER_MTOK = {
 }
 
 
-def _compute_cost_usd(model: str, input_tokens, output_tokens):
+def _compute_cost_usd(model: str, input_tokens, output_tokens,
+                       cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
     rates = MODEL_PRICING_PER_MTOK.get(model)
     if rates is None or input_tokens is None or output_tokens is None:
         return None
     input_rate, output_rate = rates
-    return (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
+    # Prompt caching's own rates, as a fixed multiplier of the base input
+    # rate (Anthropic's published pricing): a cache write costs MORE than a
+    # plain input token (it also populates the cache), a cache hit costs far
+    # LESS (it skips reprocessing entirely). Without this, cost_usd would
+    # silently under-report once caching is in use, since cached tokens
+    # never show up in the plain `input_tokens` count at all.
+    cache_write_rate = input_rate * 1.25
+    cache_read_rate = input_rate * 0.10
+    return (
+        input_tokens * input_rate
+        + (cache_creation_tokens or 0) * cache_write_rate
+        + (cache_read_tokens or 0) * cache_read_rate
+        + output_tokens * output_rate
+    ) / 1_000_000
 
 # Cap on consecutive failures (same agent, same incident) before giving up
 # and escalating to a human instead of retrying forever. A failure that's
@@ -212,13 +226,50 @@ def _json_safe(value):
     return value
 
 
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def _mark_cache(content_blocks: list) -> None:
+    """Set a cache breakpoint on the last block of this content list --
+    caches everything up to and including that block for reuse by a later
+    call within the ~5min ephemeral TTL."""
+    if content_blocks:
+        content_blocks[-1] = {**content_blocks[-1], "cache_control": _CACHE_CONTROL}
+
+
+def _unmark_cache(content_blocks: list) -> None:
+    if content_blocks and "cache_control" in content_blocks[-1]:
+        content_blocks[-1] = {k: v for k, v in content_blocks[-1].items()
+                               if k != "cache_control"}
+
+
+def _error_message(e: BaseException) -> str:
+    """str(e) for a BaseExceptionGroup (e.g. asyncio.TaskGroup teardown
+    inside the MCP client transport) is just its own wrapper message --
+    "unhandled errors in a TaskGroup (1 sub-exception)" -- with the actual
+    cause hidden inside .exceptions. Unwrap it so agent_runs.error records
+    something a human can act on."""
+    if isinstance(e, BaseExceptionGroup):
+        return "; ".join(_error_message(sub) for sub in e.exceptions)
+    return str(e)
+
+
 async def _call_with_mcp_tools(client, servers, system, user_message, model,
                                 max_tokens, max_turns, log_prefix, log_call):
     """Client-side tool-use loop: THIS process connects to each MCP server,
     discovers its tools, hands Claude plain tool definitions, and executes
     every tool_use request itself before feeding the result back. Claude
     never touches the MCP server directly — this function is the mediation
-    point for logging/rate-limiting/authorization."""
+    point for logging/rate-limiting/authorization.
+
+    Prompt caching: system prompt and tool definitions are identical on
+    every call this agent type ever makes, so both get a cache breakpoint
+    (this is most of the token cost, dwarfing the per-incident context).
+    Within one incident's own multi-turn loop, a second breakpoint moves to
+    the latest message each turn so the growing history isn't re-priced as
+    fresh input on every round trip -- capped at 2 breakpoints total here,
+    well under the API's 4-breakpoint limit regardless of how many turns
+    MAX_TOOL_TURNS allows."""
     async with AsyncExitStack() as stack:
         sessions_by_tool: dict[str, ClientSession] = {}
         anthropic_tools = []
@@ -239,15 +290,25 @@ async def _call_with_mcp_tools(client, servers, system, user_message, model,
                     "description": tool.description or "",
                     "input_schema": tool.inputSchema,
                 })
+        if anthropic_tools:
+            anthropic_tools[-1] = {**anthropic_tools[-1], "cache_control": _CACHE_CONTROL}
 
-        messages = [user_message]
+        cached_system = [{"type": "text", "text": system, "cache_control": _CACHE_CONTROL}]
+
+        first_content = user_message["content"]
+        if isinstance(first_content, str):
+            first_content = [{"type": "text", "text": first_content}]
+        messages = [{"role": "user", "content": list(first_content)}]
+        _mark_cache(messages[-1]["content"])
+
         response = client.messages.create(
-            model=model, max_tokens=max_tokens, system=system,
+            model=model, max_tokens=max_tokens, system=cached_system,
             tools=anthropic_tools, messages=messages,
         )
         log_call(0, anthropic_tools, messages, response)
         turns = 0
         while response.stop_reason == "tool_use" and turns < max_turns:
+            _unmark_cache(messages[-1]["content"])
             messages.append({"role": "assistant", "content": response.content})
             tool_results = []
             for block in response.content:
@@ -276,24 +337,33 @@ async def _call_with_mcp_tools(client, servers, system, user_message, model,
                         "is_error": True,
                     })
             messages.append({"role": "user", "content": tool_results})
+            _mark_cache(messages[-1]["content"])
             response = client.messages.create(
-                model=model, max_tokens=max_tokens, system=system,
+                model=model, max_tokens=max_tokens, system=cached_system,
                 tools=anthropic_tools, messages=messages,
             )
             turns += 1
             log_call(turns, anthropic_tools, messages, response)
 
-        if response.stop_reason == "tool_use":
-            # Cut off at max_turns mid tool-call: response.content has no
-            # text block at all, so letting this through would make run_llm()
-            # try to json.loads("") and fail with a cryptic "Expecting
-            # value: line 1 column 1 (char 0)" that looks nothing like the
-            # real problem.
-            raise RuntimeError(
-                f"[{log_prefix}] tool loop exhausted after {max_turns} turns "
-                "without a final answer"
-            )
-        return response
+        exhausted = response.stop_reason == "tool_use"
+
+    # Raised AFTER the `async with` above has exited (session/transport torn
+    # down cleanly) rather than from inside it: raising in-block let the MCP
+    # transport's own internal task group swallow this into an opaque
+    # "unhandled errors in a TaskGroup (1 sub-exception)" on cleanup, hiding
+    # the actual reason (agent_runs.error would show the wrapper, not this
+    # message).
+    if exhausted:
+        # Cut off at max_turns mid tool-call: response.content has no
+        # text block at all, so letting this through would make run_llm()
+        # try to json.loads("") and fail with a cryptic "Expecting
+        # value: line 1 column 1 (char 0)" that looks nothing like the
+        # real problem.
+        raise RuntimeError(
+            f"[{log_prefix}] tool loop exhausted after {max_turns} turns "
+            "without a final answer"
+        )
+    return response
 
 
 class BaseAgent:
@@ -452,7 +522,7 @@ class BaseAgent:
             db.rollback()
             run = db.get(AgentRun, run.id)
             run.status = RunStatus.FAILED
-            run.error = str(e)
+            run.error = _error_message(e)
             run.completed_at = datetime.now(timezone.utc)
 
             failures = self._consecutive_failures(db, incident_id, run.id) + 1
@@ -492,6 +562,8 @@ class BaseAgent:
             text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
             input_tokens = getattr(response.usage, "input_tokens", None)
             output_tokens = getattr(response.usage, "output_tokens", None)
+            cache_creation_tokens = getattr(response.usage, "cache_creation_input_tokens", None) or 0
+            cache_read_tokens = getattr(response.usage, "cache_read_input_tokens", None) or 0
             db.add(LLMCall(
                 agent_run_id=run_id,
                 agent_type=self.agent_type,
@@ -505,7 +577,8 @@ class BaseAgent:
                 stop_reason=response.stop_reason,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                cost_usd=_compute_cost_usd(model, input_tokens, output_tokens),
+                cost_usd=_compute_cost_usd(model, input_tokens, output_tokens,
+                                            cache_creation_tokens, cache_read_tokens),
             ))
             db.commit()
         except Exception as e:
@@ -527,10 +600,13 @@ class BaseAgent:
 
         servers = self.mcp_servers()
         if not servers:
+            # system_prompt() is identical on every call this agent type
+            # ever makes -- cache it so repeat incidents don't re-pay full
+            # price for the same instructions every time.
             response = self.client.messages.create(
                 model=MODEL,
                 max_tokens=2000,
-                system=system,
+                system=[{"type": "text", "text": system, "cache_control": _CACHE_CONTROL}],
                 messages=[user_message],
             )
             self._log_llm_call(run_id, 0, MODEL, system, [], [user_message], response)

@@ -48,6 +48,9 @@ class ITSMClient:
     def fetch_open_incidents(self) -> list[ITSMTicket]:
         raise NotImplementedError
 
+    def close_ticket(self, ticket_id: str, comment: str = None) -> None:
+        raise NotImplementedError
+
 
 class StubITSMClient(ITSMClient):
     """Fakes an open-incident queue for local dev/demo — no network calls.
@@ -92,6 +95,9 @@ class StubITSMClient(ITSMClient):
     def fetch_open_incidents(self) -> list[ITSMTicket]:
         return list(self._queue)
 
+    def close_ticket(self, ticket_id: str, comment: str = None) -> None:
+        print(f"  [itsm-stub] close {ticket_id}: {comment}")
+
 
 class NullITSMClient(ITSMClient):
     """Empty queue — for tests/demos that manage incidents manually and don't
@@ -99,6 +105,9 @@ class NullITSMClient(ITSMClient):
 
     def fetch_open_incidents(self) -> list[ITSMTicket]:
         return []
+
+    def close_ticket(self, ticket_id: str, comment: str = None) -> None:
+        pass
 
 
 def _adf_to_text(node) -> str:
@@ -201,6 +210,58 @@ class JiraServiceManagementITSMClient(ITSMClient):
         )
         resp.raise_for_status()
         return [self._to_ticket(issue) for issue in resp.json().get("issues", [])]
+
+    def close_ticket(self, ticket_id: str, comment: str = None) -> None:
+        """Transition the issue to whatever status in its workflow is
+        category "Done" -- statuses are per-project/workflow-configurable,
+        so there's no fixed status name to target, only the fixed
+        statusCategory every Jira workflow's terminal status maps to."""
+        resp = requests.get(
+            f"{self.api_base}/rest/api/3/issue/{ticket_id}/transitions",
+            auth=self.auth,
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        transitions = resp.json().get("transitions", [])
+        done_transitions = [
+            t for t in transitions
+            if (t.get("to") or {}).get("statusCategory", {}).get("key") == "done"
+        ]
+        if not done_transitions:
+            raise RuntimeError(
+                f"{ticket_id}: no transition to a Done-category status found "
+                f"(available: {[t['name'] for t in transitions]})"
+            )
+        # A workflow can expose more than one Done-category transition (e.g.
+        # both "Close" -> Closed and "Cancel" -> Canceled) -- statusCategory
+        # alone can't tell a successful resolution from an abandoned ticket,
+        # so prefer whichever transition doesn't read as a cancellation.
+        done = next(
+            (t for t in done_transitions if "cancel" not in t["name"].lower()),
+            done_transitions[0],
+        )
+
+        if comment:
+            requests.post(
+                f"{self.api_base}/rest/api/3/issue/{ticket_id}/comment",
+                auth=self.auth,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                json={"body": {
+                    "type": "doc", "version": 1,
+                    "content": [{"type": "paragraph",
+                                 "content": [{"type": "text", "text": comment}]}],
+                }},
+                timeout=10,
+            ).raise_for_status()
+
+        requests.post(
+            f"{self.api_base}/rest/api/3/issue/{ticket_id}/transitions",
+            auth=self.auth,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            json={"transition": {"id": done["id"]}},
+            timeout=10,
+        ).raise_for_status()
 
     def _to_ticket(self, issue: dict) -> ITSMTicket:
         fields = issue["fields"]

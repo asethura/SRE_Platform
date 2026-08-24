@@ -214,13 +214,15 @@ agent; raise it deliberately.
 
 ## Swapping stubs for production
 
-1. **Observability** — `validation.py` reads live Prometheus metrics via the
-   MCP connector (`PROMETHEUS_MCP_URL`, see `cloudrun/prometheus-mcp/` —
-   queries Google Managed Prometheus, same bundled nginx-gate + Cloud Run
-   pattern as Confluence). `diagnosis.py`'s `fetch_metrics/logs/traces/deploys`
-   are still stubs — point `fetch_metrics` at the same Prometheus MCP server
-   next, then swap `fetch_logs/traces/deploys` for ELK / Tempo / GitHub MCP
-   clients.
+1. **Observability** — done: both `validation.py` and `diagnosis.py` read live
+   metrics via the same Prometheus MCP connector (`PROMETHEUS_MCP_URL`, see
+   `cloudrun/prometheus-mcp/` — queries Google Managed Prometheus, same
+   bundled nginx-gate + Cloud Run pattern as Confluence); `diagnosis.py` also
+   reads logs/traces/deploys live via Cloud Logging, Cloud Trace, and GitHub
+   MCP servers. No more hardcoded `fetch_metrics()` stub — diagnosis's
+   system prompt explicitly requires evidence to be checked against a
+   provided `now` timestamp, since logging/trace tools can return
+   arbitrarily old results if a query isn't time-scoped.
 2. **Playbook executor** — done: `execute_playbook()` (`agents/remediation.py`)
    POSTs each executed step's params to `{PLAYBOOK_SERVER_URL}{Playbook.endpoint}`
    on a single playbook server, which owns the actual remediation mechanism

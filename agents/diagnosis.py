@@ -3,12 +3,12 @@ Diagnosis Agent — deep root-cause analysis. Two outcomes:
   diagnosed            -> root cause + remediation steps -> gate 1 approval
   unable_to_diagnose   -> escalate to human
 
-Reads logs and traces live via MCP (Cloud Logging = the "ELK" equivalent,
-Cloud Trace = the "Tempo" equivalent — neither is self-hosted here, see
-cloudrun/logging-mcp/ and cloudrun/trace-mcp/) and recent deploys/commits
-from GitHub's hosted MCP endpoint. fetch_metrics (Prometheus) is still a
-stub — wire it into the same prometheus-mcp server ValidationAgent already
-uses, next.
+Reads logs, traces, and metrics live via MCP (Cloud Logging = the "ELK"
+equivalent, Cloud Trace = the "Tempo" equivalent, Prometheus = the same
+prometheus-mcp server ValidationAgent already uses — none of these are
+self-hosted here, see cloudrun/logging-mcp/, cloudrun/trace-mcp/, and
+cloudrun/prometheus-mcp/) and recent deploys/commits from GitHub's hosted
+MCP endpoint.
 
 No Confluence here — diagnosis reasons out its own root cause AND its own
 free-text remediation steps (no runbook to search for or cite). A human
@@ -16,6 +16,8 @@ approves that reasoning (Approval.stage=DIAGNOSIS) before remediation's
 planning phase maps the steps onto the playbook catalog and asks for a
 second approval (Approval.stage=REMEDIATION) to execute them.
 """
+
+from datetime import datetime, timezone
 
 from db.models import (
     Approval,
@@ -29,16 +31,9 @@ from .base import (
     BaseAgent,
     github_mcp_server,
     logging_mcp_server,
+    prometheus_mcp_server,
     trace_mcp_server,
 )
-
-
-# --- Still a stub: swap for the same prometheus-mcp server validation.py uses --
-
-def fetch_metrics(service: str) -> dict:
-    """Prometheus MCP in production."""
-    return {"cpu_pct": 91, "mem_pct": 62, "error_rate_5xx": 0.07,
-            "pod_restarts_last_hour": 4}
 
 
 class DiagnosisAgent(BaseAgent):
@@ -48,20 +43,41 @@ class DiagnosisAgent(BaseAgent):
         return [
             logging_mcp_server(),
             trace_mcp_server(),
+            prometheus_mcp_server(),
             github_mcp_server(),
         ]
 
     def system_prompt(self) -> str:
         return """You are the Diagnosis agent in an SRE incident-automation platform.
 Triage could not match this incident to a known pattern. Perform root-cause
-analysis using the incident description, service topology, and the metrics
-(pre-fetched below — still a stub, see fetch_metrics), plus tools to pull
-your own logs, traces, and recent deploys/commits live:
+analysis using the incident description and service topology, plus tools to
+pull your own logs, traces, metrics, and recent deploys/commits live:
 - logging tools: search Cloud Logging for this service's recent errors/warnings.
 - trace tools: list/get recent traces for this service to spot slow or
   failing spans.
+- prometheus tools: query CURRENT metrics for this service (CPU, memory,
+  5xx rate, restart count, pod status) — this is real live data, not a
+  pre-fetched snapshot, so use it to confirm what's happening right now.
 - github tools: check recent commits/PRs merged to this repo — a deploy
   shortly before symptoms started is causation-shaped.
+
+CRITICAL — evidence must be CURRENT, not historical:
+- "now" is given in the incident context below. Logging/trace tools can
+  return results from hours or days ago if you don't constrain the time
+  window — an old log line proves something happened once, not that it is
+  still happening. Always weigh how old your evidence actually is relative
+  to "now", and scope queries to a recent window (e.g. the last 15-30
+  minutes) rather than an unbounded search.
+- Before citing a specific pod/instance by name as evidence, confirm via a
+  fresh Prometheus/logging query that it is CURRENTLY part of the live pod
+  set for this service, not a prior instance that has since been replaced
+  (remediation, rollbacks, and normal rescheduling all replace pod names —
+  a name appearing in old logs does not mean it exists now).
+- If your tools show the symptom is NOT currently reproducible (e.g. the
+  service's current metrics/logs look healthy) even though older evidence
+  looked bad, do not diagnose a still-ongoing incident from stale evidence
+  alone — that is unable_to_diagnose (say so, and note the issue may have
+  already self-resolved) rather than reporting a resolved problem as active.
 
 Reason step by step internally, then commit to ONE outcome:
 - diagnosed: you found the root cause AND can state concrete remediation
@@ -88,14 +104,15 @@ Respond ONLY with JSON:
 }"""
 
     def build_context(self, db, incident: Incident) -> dict:
-        svc = incident.service or "unknown"
         return {
+            "now": datetime.now(timezone.utc).isoformat(),
             "incident": {
                 "id": incident.id, "title": incident.title,
                 "description": incident.description,
-                "service": svc, "severity": incident.severity,
+                "service": incident.service or "unknown",
+                "severity": incident.severity,
+                "reported_at": incident.created_at.isoformat() if incident.created_at else None,
             },
-            "metrics": fetch_metrics(svc),
         }
 
     def apply_output(self, db, incident: Incident, output: dict) -> None:

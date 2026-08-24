@@ -76,7 +76,7 @@ def main():
     agent_cls = AGENTS[sys.argv[1]]
 
     kwargs = {}
-    if agent_cls is TriageAgent:
+    if agent_cls in (TriageAgent, ValidationAgent):
         itsm_name = os.environ.get("SRE_ITSM_CLIENT", "stub")
         if itsm_name not in ITSM_CLIENTS:
             print(f"Unknown SRE_ITSM_CLIENT={itsm_name!r}; expected one of {list(ITSM_CLIENTS)}")

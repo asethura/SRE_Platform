@@ -164,7 +164,26 @@ def deployments_rollback():
     if len(owned) < 2:
         return jsonify(error="no previous revision to roll back to"), 409
 
-    target = owned[1]  # owned[0] is the current (bad) revision
+    # Which RS is "current" is NOT reliably the highest revision number:
+    # when a rollback's target template exactly matches an existing RS,
+    # Kubernetes reuses that RS object and bumps ITS revision annotation
+    # rather than creating a new one -- so calling this endpoint a second
+    # time on the same pair of ReplicaSets can flip which one sorts first,
+    # silently rolling back to the previously-bad revision instead of away
+    # from it. Identify "current" from the Deployment's own live template
+    # instead of trusting sort position.
+    api = client.ApiClient()
+    current_template = api.sanitize_for_serialization(current.spec.template)
+    current_rs = next(
+        (rs for rs in owned
+         if api.sanitize_for_serialization(rs.spec.template) == current_template),
+        owned[0],  # fallback: shouldn't happen, but never worse than the old assumption
+    )
+    candidates = [rs for rs in owned if rs is not current_rs]
+    if not candidates:
+        return jsonify(error="no previous revision to roll back to"), 409
+
+    target = candidates[0]  # most recent revision that ISN'T the one currently live
     template = client.ApiClient().sanitize_for_serialization(target.spec.template)
     patch = {"spec": {"template": template}}
     try:

@@ -140,6 +140,15 @@ Respond ONLY with JSON:
             # Gap #2 from the diagram review: triage closes the ITSM ticket.
             incident.status = IncidentStatus.CLOSED_NON_ISSUE
             incident.resolved_at = datetime.now(timezone.utc)
+            if incident.itsm_ticket_id:
+                try:
+                    self.itsm_client.close_ticket(
+                        incident.itsm_ticket_id,
+                        comment=f"Closed as non-issue by SRE platform: {output.get('reasoning', '')}",
+                    )
+                except Exception as e:
+                    print(f"[{self.instance_id}] failed to close ITSM ticket "
+                          f"{incident.itsm_ticket_id}: {e}")
 
         elif verdict == TriageVerdict.KNOWN_ISSUE:
             steps = output.get("remediation_steps")

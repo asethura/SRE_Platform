@@ -104,29 +104,33 @@ class RemediationAgent(BaseAgent):
     def _phase(incident: Incident) -> str:
         return "planning" if incident.status in _PLANNING_STATUSES else "execute"
 
-    def _latest_approval(self, db, incident: Incident, stage: ApprovalStage,
-                          status: ApprovalStatus = None) -> Approval | None:
-        q = (db.query(Approval)
-             .filter(Approval.incident_id == incident.id,
-                     Approval.stage == stage))
-        if status is not None:
-            q = q.filter(Approval.status == status)
-        return q.order_by(Approval.created_at.desc()).first()
+    def _latest_approval(self, db, incident: Incident, stage: ApprovalStage) -> Approval | None:
+        """Most recent Approval row for this incident+stage, regardless of
+        status. This is the row that must be APPROVED for the gate to be
+        open -- a fresh PENDING row from a new diagnosis/remediation cycle
+        has to supersede whatever was approved on a previous cycle, or a
+        human's earlier sign-off would silently keep re-authorizing every
+        later, never-reviewed cycle forever."""
+        return (db.query(Approval)
+                .filter(Approval.incident_id == incident.id,
+                        Approval.stage == stage)
+                .order_by(Approval.created_at.desc())
+                .first())
 
     def eligible(self, db, incident: Incident) -> bool:
         """Per-phase hard gate:
         - REMEDIATING (triage known_issue): no gate 1 exists, always eligible.
-        - AWAITING_DIAGNOSIS_APPROVAL: eligible once gate 1 is APPROVED.
-        - AWAITING_REMEDIATION_APPROVAL: eligible once gate 2 is APPROVED.
+        - AWAITING_DIAGNOSIS_APPROVAL: eligible once the LATEST gate-1 row is APPROVED.
+        - AWAITING_REMEDIATION_APPROVAL: eligible once the LATEST gate-2 row is APPROVED.
         """
         if incident.status == IncidentStatus.REMEDIATING:
             return True
         if incident.status == IncidentStatus.AWAITING_DIAGNOSIS_APPROVAL:
-            return self._latest_approval(db, incident, ApprovalStage.DIAGNOSIS,
-                                          ApprovalStatus.APPROVED) is not None
+            apr = self._latest_approval(db, incident, ApprovalStage.DIAGNOSIS)
+            return apr is not None and apr.status == ApprovalStatus.APPROVED
         if incident.status == IncidentStatus.AWAITING_REMEDIATION_APPROVAL:
-            return self._latest_approval(db, incident, ApprovalStage.REMEDIATION,
-                                          ApprovalStatus.APPROVED) is not None
+            apr = self._latest_approval(db, incident, ApprovalStage.REMEDIATION)
+            return apr is not None and apr.status == ApprovalStatus.APPROVED
         return False
 
     # ------------------------------------------------------------------ #
@@ -134,11 +138,11 @@ class RemediationAgent(BaseAgent):
     # freshly-generated one, so it never touches the LLM at all.
     # ------------------------------------------------------------------ #
 
-    def run_llm(self, context: dict) -> dict:
+    def run_llm(self, context: dict, run_id: str) -> dict:
         if context.get("phase") == "execute":
             return {"execution_plan": context["approved_plan"],
                      "notes": "executing pre-approved plan verbatim"}
-        return super().run_llm(context)
+        return super().run_llm(context, run_id)
 
     def system_prompt(self) -> str:
         # Only the planning phase ever reaches the LLM (see run_llm above).
@@ -166,8 +170,8 @@ Respond ONLY with JSON:
     def build_context(self, db, incident: Incident) -> dict:
         phase = self._phase(incident)
         if phase == "execute":
-            apr = self._latest_approval(db, incident, ApprovalStage.REMEDIATION,
-                                         ApprovalStatus.APPROVED)
+            # eligible() already confirmed the latest gate-2 row is APPROVED.
+            apr = self._latest_approval(db, incident, ApprovalStage.REMEDIATION)
             return {
                 "phase": "execute",
                 "approved_plan": apr.proposed_plan,
@@ -249,8 +253,8 @@ Respond ONLY with JSON:
         if not self.acquire_lock(db, incident):
             raise RuntimeError(f"Service {incident.service} locked by another remediation")
 
-        apr = self._latest_approval(db, incident, ApprovalStage.REMEDIATION,
-                                     ApprovalStatus.APPROVED)
+        # eligible() already confirmed the latest gate-2 row is APPROVED.
+        apr = self._latest_approval(db, incident, ApprovalStage.REMEDIATION)
         risk_tier = apr.risk_tier if apr else None
 
         executed: list[Playbook] = []
