@@ -1,3 +1,4 @@
+import { ListChecks } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api } from "./api.js";
@@ -5,10 +6,10 @@ import { api } from "./api.js";
 const POLL_MS = 15000;
 
 const AGENT_LABELS = {
-  triage: "Triage",
-  diagnosis: "Diagnosis",
-  remediation: "Remediation",
-  validation: "Validation",
+  triage: "Triage Agent",
+  diagnosis: "Diagnosis Agent",
+  remediation: "Remediation Agent",
+  validation: "Validation Agent",
 };
 
 function formatAge(startedAt) {
@@ -52,25 +53,54 @@ export default function FleetTab() {
 
   return (
     <div>
+      <div className="page-header">
+        <div>
+          <h1>Fleet</h1>
+          <p>How many agents of each type are deployed, and what they're working on right now.</p>
+        </div>
+      </div>
+
       <div className="card-grid">
-        {fleet.map((row) => (
-          <button
-            key={row.agent_type}
-            className={`card fleet-card ${expanded === row.agent_type ? "selected" : ""}`}
-            onClick={() => toggle(row.agent_type)}
-          >
-            <div className="fleet-card-title">{AGENT_LABELS[row.agent_type] || row.agent_type}</div>
-            <div className="fleet-card-count">
-              {row.available_replicas}/{row.desired_replicas}
-            </div>
-            <div className="fleet-card-sub">available / desired</div>
-          </button>
-        ))}
+        {fleet.map((row) => {
+          const unavailable = Math.max(0, row.desired_replicas - row.available_replicas);
+          const pct = row.desired_replicas
+            ? Math.round((row.available_replicas / row.desired_replicas) * 100)
+            : 0;
+          return (
+            <button
+              key={row.agent_type}
+              className={`card fleet-card ${expanded === row.agent_type ? "selected" : ""}`}
+              onClick={() => toggle(row.agent_type)}
+            >
+              <div className="fleet-card-title">{AGENT_LABELS[row.agent_type] || row.agent_type}</div>
+              <div className="fleet-card-count">
+                {row.desired_replicas} <span className="of">total deployed</span>
+              </div>
+              <div className="fleet-breakdown">
+                <div className="fleet-breakdown-row">
+                  <span className="dot dot-green" /> Available <b>{row.available_replicas}</b>
+                </div>
+                {unavailable > 0 && (
+                  <div className="fleet-breakdown-row">
+                    <span className="dot dot-gray" /> Unavailable <b>{unavailable}</b>
+                  </div>
+                )}
+              </div>
+              <div className="bar-track">
+                <div className="bar-segment" style={{ width: `${pct}%`, background: "var(--green)" }} />
+                <div className="bar-segment" style={{ width: `${100 - pct}%`, background: "var(--gray-soft)" }} />
+              </div>
+            </button>
+          );
+        })}
       </div>
 
       {expanded && (
-        <div className="panel">
-          <h3>{AGENT_LABELS[expanded] || expanded} — active incidents</h3>
+        <div className="card panel">
+          <div className="panel-header">
+            <ListChecks size={15} />
+            {AGENT_LABELS[expanded] || expanded} — active incidents
+          </div>
           {loadingActive && <p className="muted">Loading…</p>}
           {!loadingActive && active.length === 0 && (
             <p className="muted">No incidents currently being worked by this agent type.</p>
@@ -94,7 +124,9 @@ export default function FleetTab() {
                       <div className="muted small">{inc.incident_id}</div>
                     </td>
                     <td>{inc.service || "—"}</td>
-                    <td>{inc.severity}</td>
+                    <td>
+                      <span className={`badge badge-${inc.severity?.toLowerCase()}`}>{inc.severity}</span>
+                    </td>
                     <td>{inc.status}</td>
                     <td>{formatAge(inc.started_at)}</td>
                   </tr>
