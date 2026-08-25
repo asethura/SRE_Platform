@@ -30,7 +30,7 @@ class ITSMTicket:
     ticket_id: str
     title: str
     description: str
-    service: str
+    service: str | None    # None when the ITSM ticket has no reliable service field
     severity: str          # P1..P4
     source: str            # pagerduty | datadog | manual
     reported_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -268,7 +268,15 @@ class JiraServiceManagementITSMClient(ITSMClient):
         priority_name = ((fields.get("priority") or {}).get("name") or "").lower()
         severity = self._PRIORITY_MAP.get(priority_name, Severity.P3)
         components = fields.get("components") or []
-        service = components[0]["name"] if components else fields["project"]["key"].lower()
+        # No project-key fallback here: the Jira project key (e.g. "ZPM") is
+        # a ticketing category, not a Kubernetes service/deployment name --
+        # handing it to an agent as `service` reads as a real, verified
+        # identifier and gets queried against literally (wasted tool calls
+        # hunting for a resource that doesn't exist) before the agent falls
+        # back to reading the actual service name out of the description.
+        # None is honest about "ITSM didn't tell us"; agents already derive
+        # the real name from title/description when this is unset.
+        service = components[0]["name"] if components else None
         return ITSMTicket(
             ticket_id=issue["key"],
             title=fields.get("summary") or "",

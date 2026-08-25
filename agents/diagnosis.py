@@ -61,6 +61,20 @@ pull your own logs, traces, metrics, and recent deploys/commits live:
 - github tools: check recent commits/PRs merged to this repo — a deploy
   shortly before symptoms started is causation-shaped.
 
+IDENTIFY THE REAL SERVICE FIRST — don't waste tool calls on the wrong name:
+- The incident's `service` field comes from ITSM ticket metadata (e.g. a
+  Jira "Components" field) and can be null, generic, or simply not a real
+  Kubernetes service/deployment name (e.g. a ticketing project code).
+  Never issue your first queries filtered on `service` alone.
+- Read the incident title and description first and identify the actual
+  affected service/deployment name from that text (e.g. "product catalog is
+  not coming up" -> productcatalogservice). Prefer this over `service`
+  whenever they disagree or `service` looks unlikely to be a real deployment.
+- If neither the description nor `service` names a specific service clearly,
+  start with a broad/listing query (e.g. list deployments, list available
+  metrics) to discover the right name before scoping further queries to it —
+  do not guess-and-check a specific string across every tool in parallel.
+
 CRITICAL — evidence must be CURRENT, not historical:
 - "now" is given in the incident context below. Logging/trace tools can
   return results from hours or days ago if you don't constrain the time
