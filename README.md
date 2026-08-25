@@ -29,7 +29,9 @@ sre-platform/
 ├── Dockerfile           # One image, agent type picked via CMD arg
 ├── playbook-server/     # Real Kubernetes API calls — the only thing that touches the live cluster
 ├── playbook-mcp/        # Discovery-only MCP gateway over the `playbooks` table (list/describe, no execution)
-└── k8s/base/            # Kustomize base: Deployment per agent + seed Job + playbook-server/-mcp
+├── api/                 # FastAPI backend for the UI — Fleet/FinOps/Tasks (see below)
+├── ui/                  # React SPA served by api/ — Fleet/FinOps/Tasks tabs
+└── k8s/base/            # Kustomize base: Deployment per agent + seed Job + playbook-server/-mcp/api
 ```
 
 ## No runbook documents — diagnosis and remediation reason for themselves
@@ -112,12 +114,17 @@ coordinating through the DB, exactly as above. `k8s/base/` is a Kustomize
 base with a Deployment per agent, a shared ConfigMap, and a one-time seed
 Job.
 
-**1. Build and push the image** (one image, four agent types — the
-Deployments pick the type via `args:`):
+**1. Build and push the images** (one image for all four agent types — the
+Deployments pick the type via `args:` — plus separate images for
+`playbook-server`, `playbook-mcp`, and `sre-api`):
 
 ```bash
 docker build -t your-registry/sre-platform:latest .
 docker push your-registry/sre-platform:latest
+
+# api/'s build context is the repo root (needs db/ and hitl.py), like playbook-mcp/:
+docker build -f api/Dockerfile -t your-registry/sre-api:latest .
+docker push your-registry/sre-api:latest
 ```
 
 **2. Point `DATABASE_URL` at Postgres.** This deployment assumes an
@@ -210,6 +217,38 @@ it up — the fault only exists in the cluster until something makes an
 `Incident` row for it. `bad-deploy` maps to `PB-017` (rollback_deployment),
 which the pipeline can execute and validate without any manual step once the
 two gates are approved.
+
+## UI — Fleet, FinOps, and Tasks
+
+`api/` (FastAPI) + `ui/` (React SPA, built and served as static files by
+`api/`) give a human three things, with no new approval logic — the Tasks
+tab calls `hitl.py`'s `approve()`/`reject()` directly:
+
+- **Fleet** — live Deployment replica counts per agent type, read from the
+  Kubernetes API (`api/k8s_fleet.py`; new read-only `sre-api`
+  ServiceAccount/Role/RoleBinding, `k8s/base/api-rbac.yaml`, scoped to
+  `get`+`list` on `deployments` in the `sre-platform` namespace only).
+  Clicking a card drills into which incidents that agent type currently has
+  claimed (`agent_runs.status IN (CLAIMED, RUNNING)`).
+- **FinOps** — total/24h/7d cost, a cost-trend chart stacked by agent type,
+  and a by-agent breakdown, all from the existing `llm_calls` table. The
+  trend endpoint buckets by day in Python rather than SQL so it behaves
+  identically on SQLite (dev) and Postgres (cluster).
+- **Tasks** — pending `Approval` rows with Approve/Reject buttons. Reject is
+  intentionally plain for now: it stores a reason via the existing
+  `Approval.reject_reason` field and nothing more — no `feedback`-table
+  write, no automated Confluence KB-article update (that's a separate,
+  not-yet-built worker; the current MCP connector is read-only anyway).
+
+**Reaching it:** `kubectl port-forward -n sre-platform svc/sre-api 8000:8000`,
+then open `http://localhost:8000`. No Ingress, TLS, or app-level auth exists
+for this service (v1 scope) — it's deliberately never exposed beyond
+`kubectl`'s own access control, the same way every other in-cluster
+resource in this repo has been reached so far.
+
+**Local dev:** `uvicorn api.app:app --reload` (reads `DATABASE_URL`/falls
+back to local SQLite, same as every other component) + `cd ui && npm run
+dev` (Vite proxies `/api` to `:8000`, see `ui/vite.config.js`).
 
 ## How coordination works without an orchestrator
 
