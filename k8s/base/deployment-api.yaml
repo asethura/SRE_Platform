@@ -1,0 +1,78 @@
+# The UI backend: FastAPI service serving both the JSON API (Fleet/FinOps/
+# Tasks) and the built React SPA as static files. Reached via
+# `kubectl port-forward svc/sre-api 8000:8000` -- no Ingress, no public
+# exposure, no separate auth layer (v1 scope).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-api
+  namespace: sre-platform
+  labels:
+    app: sre-platform
+    component: sre-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-platform
+      component: sre-api
+  template:
+    metadata:
+      labels:
+        app: sre-platform
+        component: sre-api
+    spec:
+      serviceAccountName: sre-api
+      containers:
+        - name: sre-api
+          image: sre-api:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: sre-config
+            - secretRef:
+                name: sre-secrets
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sre-api
+  namespace: sre-platform
+spec:
+  selector:
+    app: sre-platform
+    component: sre-api
+  ports:
+    - port: 8000
+      targetPort: 8000

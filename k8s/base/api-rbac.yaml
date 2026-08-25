@@ -1,0 +1,34 @@
+# sre-api's identity + the narrow, read-only permissions it needs for the
+# Fleet tab: replica counts of the four agent Deployments. Unlike
+# playbook-server-rbac.yaml, this is same-namespace -- the Deployments being
+# read (sre-triage, sre-diagnosis, sre-remediation, sre-validation) live in
+# sre-platform itself, not a different namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-api
+  namespace: sre-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sre-api
+  namespace: sre-platform
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sre-api
+  namespace: sre-platform
+subjects:
+  - kind: ServiceAccount
+    name: sre-api
+    namespace: sre-platform
+roleRef:
+  kind: Role
+  name: sre-api
+  apiGroup: rbac.authorization.k8s.io

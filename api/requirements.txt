@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+kubernetes>=30.1
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
