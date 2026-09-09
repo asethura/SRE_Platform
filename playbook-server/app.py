@@ -25,6 +25,7 @@ non-2xx response as a failure either way.
 
 import datetime
 import os
+import time
 
 from flask import Flask, jsonify, request
 from kubernetes import client, config
@@ -35,6 +36,15 @@ PLAYBOOK_SERVER_TOKEN = os.environ.get("PLAYBOOK_SERVER_TOKEN")
 
 RESTORE_REPLICAS_ANNOTATION = "sre-platform.io/restore-replicas"
 RESTORE_MIN_REPLICAS_ANNOTATION = "sre-platform.io/restore-min-replicas"
+
+# How long a deployment-mutating endpoint waits for the rollout to actually
+# converge before declaring success. A patch call returning 2xx only proves
+# the K8s API accepted the request -- it says nothing about whether the
+# resulting revision is healthy (e.g. rollback landing on ANOTHER broken
+# revision). Without this, RemediationAgent.execute_playbook() -- which
+# treats any 2xx as success -- has no way to tell the two apart.
+ROLLOUT_VERIFY_TIMEOUT = float(os.environ.get("ROLLOUT_VERIFY_TIMEOUT", "60"))
+ROLLOUT_VERIFY_INTERVAL = 2.0
 
 try:
     config.load_incluster_config()
@@ -72,6 +82,39 @@ def readyz():
     return jsonify(status="ready"), 200
 
 
+def _wait_for_rollout(service: str, timeout: float = ROLLOUT_VERIFY_TIMEOUT):
+    """Poll the Deployment until its rollout actually converges (same
+    condition `kubectl rollout status` checks): the controller has observed
+    the latest spec, every replica is on the current template, and every
+    replica is available. Returns (True, None) on convergence, or
+    (False, reason) if it times out or the deployment disappears -- either
+    way the caller should NOT report success, since a 2xx from the earlier
+    patch call only means the API accepted the request, not that the
+    resulting revision is healthy."""
+    deadline = time.monotonic() + timeout
+    last_seen = "no status observed"
+    while time.monotonic() < deadline:
+        try:
+            dep = apps_v1.read_namespaced_deployment(service, APP_NAMESPACE)
+        except ApiException as e:
+            return False, f"lost deployment {service} while verifying rollout: {e.reason}"
+
+        desired = dep.spec.replicas or 0
+        status = dep.status
+        updated = status.updated_replicas or 0
+        available = status.available_replicas or 0
+        total = status.replicas or 0
+        observed_current = (status.observed_generation or 0) >= (dep.metadata.generation or 0)
+        last_seen = (f"desired={desired} updated={updated} "
+                     f"available={available} total={total}")
+
+        if observed_current and updated == desired and available == desired and total == desired:
+            return True, None
+        time.sleep(ROLLOUT_VERIFY_INTERVAL)
+
+    return False, f"rollout did not converge within {timeout}s ({last_seen})"
+
+
 @app.post("/apis/apps/v1/deployments/scale")
 def deployments_scale():
     body = request.get_json(force=True) or {}
@@ -103,6 +146,10 @@ def deployments_scale():
         apps_v1.patch_namespaced_deployment(service, APP_NAMESPACE, patch)
     except ApiException as e:
         return jsonify(error=str(e.reason)), 502
+
+    converged, reason = _wait_for_rollout(service)
+    if not converged:
+        return jsonify(error=f"scale accepted but did not converge: {reason}"), 502
     return jsonify(status="ok", service=service), 200
 
 
@@ -124,6 +171,10 @@ def deployments_restart():
     except ApiException as e:
         status = 404 if e.status == 404 else 502
         return jsonify(error=str(e.reason)), status
+
+    converged, reason = _wait_for_rollout(service)
+    if not converged:
+        return jsonify(error=f"restart accepted but did not converge: {reason}"), 502
     return jsonify(status="ok", service=service), 200
 
 
@@ -190,6 +241,21 @@ def deployments_rollback():
         apps_v1.patch_namespaced_deployment(service, APP_NAMESPACE, patch)
     except ApiException as e:
         return jsonify(error=str(e.reason)), 502
+
+    # A 2xx here only means the patch was accepted -- it says nothing about
+    # whether "the previous revision" was actually healthy. One-step undo
+    # (this is exactly what `kubectl rollout undo` without --to-revision
+    # does) can land on ANOTHER broken revision if more than one bad deploy
+    # happened in a row, which looks identical to a real fix unless someone
+    # checks the resulting rollout. Verify it converges before reporting
+    # success, so a rollback onto a still-broken revision surfaces as a
+    # playbook failure (triggering RemediationAgent._handle_failure())
+    # instead of a false "remediation succeeded".
+    converged, reason = _wait_for_rollout(service)
+    if not converged:
+        return jsonify(
+            error=f"rollback to revision {revision(target)} accepted but did not converge: {reason}"
+        ), 502
     return jsonify(status="ok", service=service, rolled_back_to_revision=revision(target)), 200
 
 

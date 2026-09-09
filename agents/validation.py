@@ -53,11 +53,34 @@ expected and not itself a failure. Concretely:
 - The question is always "is the symptom gone for the service now", never
   "does this specific old pod look healthy".
 
+CRITICAL — a healthy OLD pod can hide a stuck rollout. A Deployment stuck
+mid-rollout (new ReplicaSet's pod stuck in ImagePullBackOff/CrashLoopBackOff)
+can still show kube_deployment_status_replicas_available == spec_replicas
+and a Running/Ready pod, because Kubernetes keeps the OLD ReplicaSet's pod
+serving while the new one fails — the exact trap this incident's root cause
+may already describe ("old pod masks a failed rollout"). Aggregate replica
+availability alone is NOT sufficient evidence the fix worked whenever the
+remediation involved a deployment change (rollback/restart/image update).
+For those cases you MUST additionally confirm the rollout itself converged:
+- kube_deployment_status_replicas_updated{deployment=...} ==
+  kube_deployment_spec_replicas{deployment=...} (every replica is on the
+  CURRENT template, not still running the pre-fix one)
+- kube_deployment_status_replicas{deployment=...} ==
+  kube_deployment_spec_replicas{deployment=...} (no leftover/extra replicas
+  from an old ReplicaSet still counted)
+- no kube_pod_container_status_waiting_reason{deployment=...,
+  reason=~"ImagePullBackOff|CrashLoopBackOff|ErrImagePull"} == 1 for any
+  CURRENT pod of that deployment
+A rollback/restart that leaves any of these unmet is a FAILED remediation
+even if the aggregate available-replica count still reads healthy.
+
 Rules:
-- Declare "pass" only if the ORIGINAL symptom is gone AND no new symptom appeared.
+- Declare "pass" only if the ORIGINAL symptom is gone, the rollout (if the
+  remediation touched the deployment) has actually converged per the checks
+  above, AND no new symptom appeared.
 - Respect the observation window: if metrics are healthy but the window is
   shorter than min_observation_minutes, declare "insufficient_observation".
-- Any regression or new anomaly -> "fail".
+- Any regression, unconverged rollout, or new anomaly -> "fail".
 
 Respond ONLY with JSON:
 {
@@ -76,6 +99,9 @@ Respond ONLY with JSON:
                 "cpu_pct_max": 80,
                 "p99_ms_max": 1000,
                 "min_observation_minutes": 10,
+                "rollout_replicas_unavailable_max": 0,   # for deployment-touching remediations: kube_deployment_status_replicas_available must equal spec_replicas
+                "rollout_replicas_not_updated_max": 0,   # kube_deployment_status_replicas_updated must equal spec_replicas -- no pods left on the pre-fix template
+                "image_pull_backoff_pods_max": 0,        # kube_pod_container_status_waiting_reason{reason=~"ImagePullBackOff|CrashLoopBackOff|ErrImagePull"} for current pods of this deployment
             },
         }
 

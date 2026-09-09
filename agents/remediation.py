@@ -59,7 +59,7 @@ _PLANNING_STATUSES = {
 # endpoint; it never touches Kubernetes or anything else directly.
 PLAYBOOK_SERVER_URL = os.environ.get("PLAYBOOK_SERVER_URL", "")
 PLAYBOOK_SERVER_TOKEN = os.environ.get("PLAYBOOK_SERVER_TOKEN")
-PLAYBOOK_CALL_TIMEOUT = float(os.environ.get("PLAYBOOK_CALL_TIMEOUT", "30"))
+PLAYBOOK_CALL_TIMEOUT = float(os.environ.get("PLAYBOOK_CALL_TIMEOUT", "90"))
 
 
 def execute_playbook(playbook: Playbook, params: dict) -> dict:
