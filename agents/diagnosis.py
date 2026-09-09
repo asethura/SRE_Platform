@@ -34,6 +34,7 @@ from .base import (
     prometheus_mcp_server,
     trace_mcp_server,
 )
+from .service_graph import hinted_metric, load_service_graph
 
 
 class DiagnosisAgent(BaseAgent):
@@ -70,10 +71,28 @@ IDENTIFY THE REAL SERVICE FIRST — don't waste tool calls on the wrong name:
   affected service/deployment name from that text (e.g. "product catalog is
   not coming up" -> productcatalogservice). Prefer this over `service`
   whenever they disagree or `service` looks unlikely to be a real deployment.
+  `service_graph.services` in the context below lists every real deployment
+  name this platform knows about — match against those names, don't invent one.
 - If neither the description nor `service` names a specific service clearly,
   start with a broad/listing query (e.g. list deployments, list available
   metrics) to discover the right name before scoping further queries to it —
   do not guess-and-check a specific string across every tool in parallel.
+
+USE THE SERVICE GRAPH — `service_graph` in the context below is a hand-
+authored dependency map and metric-query vocabulary (a PRIOR, not verified
+ground truth — confirm everything against live tool results, never cite it
+as evidence on its own):
+- `service_graph.services[name].depends_on` lists what that service calls.
+  A symptom in one service with a recent problem in something it depends on
+  (or that depends on it) is a causation-shaped correlation worth checking
+  — e.g. checkoutservice errors while paymentservice is also unhealthy.
+- `service_graph.metrics` gives one canonical query template per named
+  signal ({service} is a placeholder for the resolved deployment name) —
+  a starting point for your Prometheus queries, not guaranteed to match
+  what this cluster actually scrapes; confirm with list_metric_names first.
+- `service_graph.hinted_metric` (if not null) is a keyword-matched guess at
+  which signal the ticket's language points to — a hint for where to look
+  first, not a substitute for checking the actual evidence.
 
 CRITICAL — evidence must be CURRENT, not historical:
 - "now" is given in the incident context below. Logging/trace tools can
@@ -118,6 +137,7 @@ Respond ONLY with JSON:
 }"""
 
     def build_context(self, db, incident: Incident) -> dict:
+        graph = load_service_graph()
         return {
             "now": datetime.now(timezone.utc).isoformat(),
             "incident": {
@@ -126,6 +146,11 @@ Respond ONLY with JSON:
                 "service": incident.service or "unknown",
                 "severity": incident.severity,
                 "reported_at": incident.created_at.isoformat() if incident.created_at else None,
+            },
+            "service_graph": {
+                "services": graph["services"],
+                "metrics": graph["metrics"],
+                "hinted_metric": hinted_metric(f"{incident.title} {incident.description}"),
             },
         }
 

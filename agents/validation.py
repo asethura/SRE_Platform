@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from db.models import AgentType, Incident, IncidentStatus
 from integrations.itsm import ITSMClient, NullITSMClient
 from .base import BaseAgent, prometheus_mcp_server
+from .service_graph import load_service_graph
 
 
 class ValidationAgent(BaseAgent):
@@ -55,22 +56,21 @@ expected and not itself a failure. Concretely:
 
 CRITICAL — a healthy OLD pod can hide a stuck rollout. A Deployment stuck
 mid-rollout (new ReplicaSet's pod stuck in ImagePullBackOff/CrashLoopBackOff)
-can still show kube_deployment_status_replicas_available == spec_replicas
-and a Running/Ready pod, because Kubernetes keeps the OLD ReplicaSet's pod
-serving while the new one fails — the exact trap this incident's root cause
-may already describe ("old pod masks a failed rollout"). Aggregate replica
-availability alone is NOT sufficient evidence the fix worked whenever the
-remediation involved a deployment change (rollback/restart/image update).
-For those cases you MUST additionally confirm the rollout itself converged:
-- kube_deployment_status_replicas_updated{deployment=...} ==
-  kube_deployment_spec_replicas{deployment=...} (every replica is on the
-  CURRENT template, not still running the pre-fix one)
-- kube_deployment_status_replicas{deployment=...} ==
-  kube_deployment_spec_replicas{deployment=...} (no leftover/extra replicas
-  from an old ReplicaSet still counted)
-- no kube_pod_container_status_waiting_reason{deployment=...,
-  reason=~"ImagePullBackOff|CrashLoopBackOff|ErrImagePull"} == 1 for any
-  CURRENT pod of that deployment
+can still show replicas_available == replicas_desired and a Running/Ready
+pod, because Kubernetes keeps the OLD ReplicaSet's pod serving while the
+new one fails — the exact trap this incident's root cause may already
+describe ("old pod masks a failed rollout"). Aggregate replica availability
+alone is NOT sufficient evidence the fix worked whenever the remediation
+involved a deployment change (rollback/restart/image update). For those
+cases you MUST additionally confirm the rollout itself converged, using the
+exact query templates named below (from `service_graph.metrics` in the
+context — {service} there is a placeholder for this incident's resolved
+deployment name):
+- replicas_updated == replicas_desired (every replica is on the CURRENT
+  template, not still running the pre-fix one)
+- replicas_total == replicas_desired (no leftover/extra replicas from an
+  old ReplicaSet still counted)
+- image_pull_backoff == 0 for any CURRENT pod of that deployment
 A rollback/restart that leaves any of these unmet is a FAILED remediation
 even if the aggregate available-replica count still reads healthy.
 
@@ -99,10 +99,11 @@ Respond ONLY with JSON:
                 "cpu_pct_max": 80,
                 "p99_ms_max": 1000,
                 "min_observation_minutes": 10,
-                "rollout_replicas_unavailable_max": 0,   # for deployment-touching remediations: kube_deployment_status_replicas_available must equal spec_replicas
-                "rollout_replicas_not_updated_max": 0,   # kube_deployment_status_replicas_updated must equal spec_replicas -- no pods left on the pre-fix template
-                "image_pull_backoff_pods_max": 0,        # kube_pod_container_status_waiting_reason{reason=~"ImagePullBackOff|CrashLoopBackOff|ErrImagePull"} for current pods of this deployment
+                "rollout_replicas_unavailable_max": 0,   # replicas_available must equal replicas_desired
+                "rollout_replicas_not_updated_max": 0,   # replicas_updated must equal replicas_desired -- no pods left on the pre-fix template
+                "image_pull_backoff_pods_max": 0,        # image_pull_backoff for current pods of this deployment
             },
+            "service_graph": {"metrics": load_service_graph()["metrics"]},
         }
 
     def apply_output(self, db, incident: Incident, output: dict) -> None:

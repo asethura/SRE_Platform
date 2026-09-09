@@ -1,0 +1,72 @@
+# Semantic layer v1 -- Online Boutique service topology + metric vocabulary.
+#
+# This is a hand-authored PRIOR, not ground truth: it's what an engineer who
+# knows this app would sketch on a whiteboard, not something derived from
+# live traces. It exists so diagnosis/validation share one vocabulary for
+# "which service calls which" and "what does the metric for X actually
+# look like" instead of each guessing or hardcoding metric names inline in
+# prompt text. Loaded by agents/service_graph.py.
+#
+# Known gap (deliberate, not fixed here): the query templates below are the
+# agent's starting guess, not verified against what this cluster actually
+# scrapes -- diagnosis/validation are already instructed to call
+# list_metric_names first and confirm before trusting a query result.
+# Cross-checking/deriving this graph from live traces instead of hand-
+# authoring it is a real next step, not done in v1.
+
+services:
+  frontend:
+    depends_on: [adservice, cartservice, checkoutservice, currencyservice,
+                 productcatalogservice, recommendationservice, shippingservice]
+  checkoutservice:
+    depends_on: [cartservice, currencyservice, emailservice, paymentservice,
+                 productcatalogservice, shippingservice]
+  cartservice:
+    depends_on: [redis-cart]
+  recommendationservice:
+    depends_on: [productcatalogservice]
+  adservice:
+    depends_on: []
+  currencyservice:
+    depends_on: []
+  emailservice:
+    depends_on: []
+  paymentservice:
+    depends_on: []
+  productcatalogservice:
+    depends_on: []
+  redis-cart:
+    depends_on: []
+  shippingservice:
+    depends_on: []
+
+# One canonical query template per named signal. {service} is a literal
+# placeholder -- substitute the resolved deployment name before querying.
+metrics:
+  latency_p99: 'histogram_quantile(0.99, rate(grpc_server_handling_seconds_bucket{service="{service}"}[5m]))'
+  error_rate: 'rate(grpc_server_handled_total{service="{service}",grpc_code!="OK"}[5m])'
+  cpu_pct: 'rate(container_cpu_usage_seconds_total{pod=~"{service}-.*"}[5m])'
+  replicas_available: 'kube_deployment_status_replicas_available{deployment="{service}"}'
+  replicas_desired: 'kube_deployment_spec_replicas{deployment="{service}"}'
+  replicas_updated: 'kube_deployment_status_replicas_updated{deployment="{service}"}'
+  replicas_total: 'kube_deployment_status_replicas{deployment="{service}"}'
+  image_pull_backoff: 'kube_pod_container_status_waiting_reason{deployment="{service}",reason=~"ImagePullBackOff|CrashLoopBackOff|ErrImagePull"}'
+
+# Ticket-language -> which signal to check FIRST. A hint to cut down
+# aimless tool calls, not a substitute for actually looking at evidence.
+symptom_to_metric:
+  slow: latency_p99
+  slowness: latency_p99
+  latency: latency_p99
+  timeout: latency_p99
+  timing: latency_p99
+  down: replicas_available
+  unavailable: replicas_available
+  outage: replicas_available
+  crash: image_pull_backoff
+  crashing: image_pull_backoff
+  crashloop: image_pull_backoff
+  error: error_rate
+  errors: error_rate
+  failing: error_rate
+  failure: error_rate
