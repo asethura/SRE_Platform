@@ -6,6 +6,7 @@
 #
 # Build from repo root:  docker build -f playbook-mcp/Dockerfile -t playbook-mcp .
 FROM nginx:alpine
+ENV PYTHONUNBUFFERED=1
 RUN apk add --no-cache python3 py3-pip && \
     python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir "mcp==1.28.1" sqlalchemy "psycopg[binary]"

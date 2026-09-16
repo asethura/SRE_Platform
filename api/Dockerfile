@@ -13,6 +13,7 @@ COPY ui/ ./
 RUN npm run build
 
 FROM python:3.12-slim
+ENV PYTHONUNBUFFERED=1
 RUN groupadd -g 1000 sre && useradd -u 1000 -g sre -m sre
 WORKDIR /app
 
