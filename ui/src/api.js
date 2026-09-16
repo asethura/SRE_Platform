@@ -1,5 +1,7 @@
 async function request(path, options) {
-  const res = await fetch(path, options);
+  // no-store: this is a live-status dashboard polling every few seconds --
+  // a cached response is always wrong, never merely stale-but-fine.
+  const res = await fetch(path, { cache: "no-store", ...options });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`${options?.method || "GET"} ${path} -> ${res.status}: ${body}`);
