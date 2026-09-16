@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .routers import approvals, finops, fleet
+from .routers import approvals, finops, fleet, incidents
 
 app = FastAPI(title="SRE Platform UI")
 
@@ -31,6 +31,7 @@ app.add_middleware(
 app.include_router(fleet.router)
 app.include_router(finops.router)
 app.include_router(approvals.router)
+app.include_router(incidents.router)
 
 
 @app.get("/healthz")

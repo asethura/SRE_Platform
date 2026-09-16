@@ -279,6 +279,14 @@ tr:last-child td {
   border-bottom: none;
 }
 
+.row-clickable {
+  cursor: pointer;
+}
+
+.row-clickable:hover td {
+  background: var(--gray-soft);
+}
+
 .muted {
   color: var(--muted);
 }
@@ -311,6 +319,112 @@ tr:last-child td {
 .badge-p2, .badge-high { background: var(--amber-soft); color: var(--amber); }
 .badge-p3, .badge-medium { background: var(--accent-soft); color: var(--accent); }
 .badge-p4, .badge-low { background: var(--gray-soft); color: var(--muted); }
+
+.badge-tone-green { background: var(--green-soft); color: var(--green); }
+.badge-tone-red { background: var(--red-soft); color: var(--red); }
+.badge-tone-amber { background: var(--amber-soft); color: var(--amber); }
+.badge-tone-accent { background: var(--accent-soft); color: var(--accent); }
+.badge-tone-gray { background: var(--gray-soft); color: var(--muted); }
+
+/* ------------------------------------------------------------- incidents */
+
+.back-link {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 4px 0;
+  margin-bottom: 14px;
+}
+
+.back-link:hover {
+  color: var(--accent);
+}
+
+.incident-meta-line {
+  color: var(--muted);
+  margin: 6px 0 0;
+}
+
+.incident-description {
+  margin: 14px 0 0;
+  white-space: pre-wrap;
+}
+
+.incident-fact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  margin: 18px 0;
+}
+
+.incident-fact-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-2);
+  margin-bottom: 4px;
+}
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timeline-item {
+  border-left: 3px solid var(--accent);
+}
+
+.timeline-item.status-failed {
+  border-left-color: var(--red);
+}
+
+.timeline-item.status-completed {
+  border-left-color: var(--green);
+}
+
+.timeline-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.timeline-head .agent-name {
+  font-weight: 600;
+}
+
+.timeline-when {
+  color: var(--muted-2);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.timeline-body {
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.timeline-body p {
+  margin: 0 0 8px;
+}
+
+.error-box {
+  margin-top: 10px;
+  background: var(--red-soft);
+  color: var(--red);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.checks-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
 
 /* ---------------------------------------------------------------- tasks */
 

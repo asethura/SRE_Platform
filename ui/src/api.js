@@ -12,6 +12,9 @@ export const api = {
   getFleet: () => request("/api/fleet"),
   getFleetActive: (agentType) => request(`/api/fleet/${agentType}/active`),
 
+  getIncidentsInProgress: () => request("/api/incidents/in_progress"),
+  getIncidentDetail: (incidentId) => request(`/api/incidents/${incidentId}`),
+
   getFinOpsSummary: () => request("/api/finops/summary"),
   getFinOpsByAgent: () => request("/api/finops/by_agent"),
   getFinOpsTimeseries: (days = 14) => request(`/api/finops/timeseries?days=${days}`),

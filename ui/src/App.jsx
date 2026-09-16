@@ -1,19 +1,32 @@
-import { ClipboardList, LineChart, Server, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ClipboardList, LineChart, Server, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 
 import FinOpsTab from "./FinOpsTab.jsx";
 import FleetTab from "./FleetTab.jsx";
+import IncidentsTab from "./IncidentsTab.jsx";
 import TasksTab from "./TasksTab.jsx";
 
 const TABS = [
   { id: "fleet", label: "Fleet", icon: Server, Component: FleetTab },
+  { id: "incidents", label: "Incidents", icon: AlertTriangle, Component: IncidentsTab },
   { id: "finops", label: "FinOps", icon: LineChart, Component: FinOpsTab },
   { id: "tasks", label: "Tasks", icon: ClipboardList, Component: TasksTab },
 ];
 
 export default function App() {
   const [tab, setTab] = useState("fleet");
+  const [selectedIncidentId, setSelectedIncidentId] = useState(null);
   const active = TABS.find((t) => t.id === tab);
+
+  function viewIncident(incidentId) {
+    setSelectedIncidentId(incidentId);
+    setTab("incidents");
+  }
+
+  function selectTab(id) {
+    setSelectedIncidentId(null);
+    setTab(id);
+  }
 
   return (
     <div className="shell">
@@ -27,7 +40,7 @@ export default function App() {
             <button
               key={t.id}
               className={t.id === tab ? "sidebar-link active" : "sidebar-link"}
-              onClick={() => setTab(t.id)}
+              onClick={() => selectTab(t.id)}
             >
               <t.icon size={17} />
               {t.label}
@@ -35,7 +48,15 @@ export default function App() {
           ))}
         </nav>
       </aside>
-      <main>{active && <active.Component />}</main>
+      <main>
+        {active && (
+          <active.Component
+            onSelectIncident={viewIncident}
+            selectedIncidentId={selectedIncidentId}
+            onClearSelectedIncident={() => setSelectedIncidentId(null)}
+          />
+        )}
+      </main>
     </div>
   );
 }

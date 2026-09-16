@@ -1,0 +1,117 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from db.models import AgentRun, Approval, Incident, RunStatus, TERMINAL_STATUSES
+from ..deps import get_db
+
+router = APIRouter(prefix="/api/incidents", tags=["incidents"])
+
+ACTIVE_RUN_STATUSES = (RunStatus.CLAIMED, RunStatus.RUNNING)
+
+
+def _incident_summary(incident: Incident, current_agent: str | None) -> dict:
+    return {
+        "incident_id": incident.id,
+        "title": incident.title,
+        "service": incident.service,
+        "severity": incident.severity,
+        "status": incident.status.value,
+        "current_agent": current_agent,
+        "created_at": incident.created_at.isoformat() if incident.created_at else None,
+        "updated_at": incident.updated_at.isoformat() if incident.updated_at else None,
+    }
+
+
+@router.get("/in_progress")
+def get_in_progress_incidents(db: Session = Depends(get_db)):
+    """Every incident not yet in a terminal status, newest-updated first --
+    what the sidebar's Incidents tab lists. `current_agent` is whichever
+    agent type currently holds an active (claimed/running) run on it, or
+    null if it's between agents (e.g. waiting on a human approval)."""
+    incidents = db.execute(
+        select(Incident)
+        .where(Incident.status.notin_(TERMINAL_STATUSES))
+        .order_by(Incident.updated_at.desc())
+    ).scalars().all()
+    if not incidents:
+        return []
+
+    active_runs = db.execute(
+        select(AgentRun)
+        .where(
+            AgentRun.incident_id.in_([i.id for i in incidents]),
+            AgentRun.status.in_(ACTIVE_RUN_STATUSES),
+        )
+    ).scalars().all()
+    current_agent_by_incident = {r.incident_id: r.agent_type.value for r in active_runs}
+
+    return [
+        _incident_summary(inc, current_agent_by_incident.get(inc.id))
+        for inc in incidents
+    ]
+
+
+@router.get("/{incident_id}")
+def get_incident_detail(incident_id: str, db: Session = Depends(get_db)):
+    """Everything the drill-down view needs: the incident itself, its full
+    agent-run timeline (handoff medium AND audit trail, see db/models.py),
+    and any approvals raised against it."""
+    incident = db.get(Incident, incident_id)
+    if incident is None:
+        raise HTTPException(404, f"No incident {incident_id!r}")
+
+    runs = db.execute(
+        select(AgentRun)
+        .where(AgentRun.incident_id == incident_id)
+        .order_by(AgentRun.started_at.asc())
+    ).scalars().all()
+
+    approvals = db.execute(
+        select(Approval)
+        .where(Approval.incident_id == incident_id)
+        .order_by(Approval.created_at.asc())
+    ).scalars().all()
+
+    return {
+        "incident_id": incident.id,
+        "title": incident.title,
+        "description": incident.description,
+        "source": incident.source,
+        "service": incident.service,
+        "severity": incident.severity,
+        "status": incident.status.value,
+        "triage_verdict": incident.triage_verdict.value if incident.triage_verdict else None,
+        "diagnosis_outcome": incident.diagnosis_outcome.value if incident.diagnosis_outcome else None,
+        "root_cause": incident.root_cause,
+        "remediation_steps": incident.remediation_steps,
+        "created_at": incident.created_at.isoformat() if incident.created_at else None,
+        "updated_at": incident.updated_at.isoformat() if incident.updated_at else None,
+        "resolved_at": incident.resolved_at.isoformat() if incident.resolved_at else None,
+        "runs": [
+            {
+                "run_id": run.id,
+                "agent_type": run.agent_type.value,
+                "status": run.status.value,
+                "started_at": run.started_at.isoformat() if run.started_at else None,
+                "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                "output": run.output,
+                "error": run.error,
+            }
+            for run in runs
+        ],
+        "approvals": [
+            {
+                "approval_id": apr.id,
+                "stage": apr.stage.value,
+                "status": apr.status.value,
+                "summary": apr.summary,
+                "risk_tier": apr.risk_tier.value if apr.risk_tier else None,
+                "decided_by": apr.decided_by,
+                "decided_at": apr.decided_at.isoformat() if apr.decided_at else None,
+                "reject_reason": apr.reject_reason,
+                "created_at": apr.created_at.isoformat() if apr.created_at else None,
+            }
+            for apr in approvals
+        ],
+    }

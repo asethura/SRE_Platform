@@ -20,7 +20,7 @@ function formatAge(startedAt) {
   return `${Math.round(mins / 60)}h`;
 }
 
-export default function FleetTab() {
+export default function FleetTab({ onSelectIncident }) {
   const [fleet, setFleet] = useState([]);
   const [expanded, setExpanded] = useState(null);
   const [active, setActive] = useState([]);
@@ -118,7 +118,11 @@ export default function FleetTab() {
               </thead>
               <tbody>
                 {active.map((inc) => (
-                  <tr key={inc.run_id}>
+                  <tr
+                    key={inc.run_id}
+                    className="row-clickable"
+                    onClick={() => onSelectIncident?.(inc.incident_id)}
+                  >
                     <td>
                       <div>{inc.title}</div>
                       <div className="muted small">{inc.incident_id}</div>
