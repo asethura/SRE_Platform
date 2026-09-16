@@ -13,18 +13,40 @@
 # list_metric_names first and confirm before trusting a query result.
 # Cross-checking/deriving this graph from live traces instead of hand-
 # authoring it is a real next step, not done in v1.
+#
+# Each dependency carries a `criticality`, same PRIOR/not-verified status as
+# everything else here (inferred from the public microservices-demo source's
+# known request-handling behavior, e.g. ad/recommendation/email calls being
+# wrapped as best-effort, not from reading this cluster's actual deployed
+# code) -- diagnosis uses it to tell "this is why the page is fully down"
+# apart from "this is also broken but wouldn't down the page by itself":
+#   hard -- the caller's request fails/errors without it
+#   soft -- the caller degrades gracefully (logs, empty/partial result) without it
 
 services:
   frontend:
-    depends_on: [adservice, cartservice, checkoutservice, currencyservice,
-                 productcatalogservice, recommendationservice, shippingservice]
+    depends_on:
+      - {service: cartservice, criticality: hard}
+      - {service: checkoutservice, criticality: hard}
+      - {service: currencyservice, criticality: hard}
+      - {service: productcatalogservice, criticality: hard}
+      - {service: adservice, criticality: soft}
+      - {service: recommendationservice, criticality: soft}
+      - {service: shippingservice, criticality: soft}   # only called at actual checkout, not page load
   checkoutservice:
-    depends_on: [cartservice, currencyservice, emailservice, paymentservice,
-                 productcatalogservice, shippingservice]
+    depends_on:
+      - {service: cartservice, criticality: hard}
+      - {service: currencyservice, criticality: hard}
+      - {service: paymentservice, criticality: hard}
+      - {service: productcatalogservice, criticality: hard}
+      - {service: shippingservice, criticality: hard}   # order can't be quoted/placed without it
+      - {service: emailservice, criticality: soft}       # confirmation email is fire-and-forget
   cartservice:
-    depends_on: [redis-cart]
+    depends_on:
+      - {service: redis-cart, criticality: hard}
   recommendationservice:
-    depends_on: [productcatalogservice]
+    depends_on:
+      - {service: productcatalogservice, criticality: hard}
   adservice:
     depends_on: []
   currencyservice:

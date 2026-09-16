@@ -31,10 +31,13 @@ def known_services() -> list[str]:
 
 
 def neighbors(service: str) -> list[str]:
-    """Direct dependencies of `service`, or [] if it's not in the graph
+    """Direct dependency names of `service`, or [] if it's not in the graph
     (e.g. the incident's service field is a Jira project key, not a real
-    deployment name — the caller/agent still has to resolve that itself)."""
-    return load_service_graph()["services"].get(service, {}).get("depends_on", [])
+    deployment name — the caller/agent still has to resolve that itself).
+    Drops each edge's `criticality` — callers that need it should read
+    `services[name].depends_on` from load_service_graph() directly."""
+    deps = load_service_graph()["services"].get(service, {}).get("depends_on", [])
+    return [d["service"] for d in deps]
 
 
 def hinted_metric(description: str) -> str | None:

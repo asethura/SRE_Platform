@@ -82,10 +82,23 @@ USE THE SERVICE GRAPH — `service_graph` in the context below is a hand-
 authored dependency map and metric-query vocabulary (a PRIOR, not verified
 ground truth — confirm everything against live tool results, never cite it
 as evidence on its own):
-- `service_graph.services[name].depends_on` lists what that service calls.
+- `service_graph.services[name].depends_on` lists what that service calls,
+  each with a `criticality`: "hard" means the caller's request fails without
+  it; "soft" means the caller degrades gracefully (logs the error, returns a
+  partial/empty result) and stays up without it.
   A symptom in one service with a recent problem in something it depends on
   (or that depends on it) is a causation-shaped correlation worth checking
   — e.g. checkoutservice errors while paymentservice is also unhealthy.
+- When MULTIPLE upstream dependencies are unhealthy at once, criticality is
+  what separates the actual root cause from unrelated noise: a "hard"
+  dependency that just became unhealthy is causation-shaped for a fresh
+  outage; a "soft" dependency being down does not, by itself, explain the
+  caller being fully down — treat it as a separate, lower-priority finding
+  (note it in evidence/remediation_steps if genuinely broken, but do not
+  name it as *the* root cause of an outage it cannot fully explain). Also
+  weigh recency: a dependency that just went unhealthy explains a symptom
+  that just started; one that has been unhealthy for hours did not cause a
+  symptom that started minutes ago.
 - `service_graph.metrics` gives one canonical query template per named
   signal ({service} is a placeholder for the resolved deployment name) —
   a starting point for your Prometheus queries, not guaranteed to match
