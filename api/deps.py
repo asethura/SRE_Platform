@@ -3,7 +3,11 @@ one shared session_factory, a fresh session opened and closed per request."""
 
 import os
 
+from dotenv import load_dotenv
+
 from db.models import get_engine, init_db
+
+load_dotenv()
 
 session_factory = init_db(get_engine(os.environ.get("DATABASE_URL", "sqlite:///sre_platform.db")))
 
