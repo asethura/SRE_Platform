@@ -1,9 +1,76 @@
-import { ArrowLeft } from "lucide-react";
-import { useEffect, useState } from "react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, Clock, ListChecks, PieChart as PieIcon } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
 import { api } from "./api.js";
 
 const POLL_MS = 15000;
+
+const AGENT_COLORS = {
+  triage: "#2563eb",
+  diagnosis: "#d97706",
+  remediation: "#7c3aed",
+  validation: "#16a34a",
+};
+
+const TIME_RANGE_PRESETS = [
+  { key: "1d", label: "Last 1 day" },
+  { key: "7d", label: "Last 7 days" },
+  { key: "1m", label: "Last 1 month" },
+  { key: "1y", label: "Last 1 year" },
+  { key: "custom", label: "Custom" },
+];
+
+function toDateInputValue(d) {
+  return d.toISOString().slice(0, 10); // yyyy-mm-dd, for <input type="date">
+}
+
+// Preset -> [start, end) as Date objects; end is always "now" for presets.
+function presetRange(key) {
+  const end = new Date();
+  const start = new Date(end);
+  if (key === "1d") start.setDate(start.getDate() - 1);
+  else if (key === "7d") start.setDate(start.getDate() - 7);
+  else if (key === "1m") start.setMonth(start.getMonth() - 1);
+  else if (key === "1y") start.setFullYear(start.getFullYear() - 1);
+  else return null;
+  return { start, end };
+}
+
+function TimeRangeFilter({ preset, onPresetChange, customStart, customEnd, onCustomStartChange, onCustomEndChange }) {
+  return (
+    <div className="timeframe-bar">
+      {TIME_RANGE_PRESETS.map((p) => (
+        <button
+          key={p.key}
+          className={`timeframe-btn${preset === p.key ? " active" : ""}`}
+          onClick={() => onPresetChange(p.key)}
+        >
+          {p.label}
+        </button>
+      ))}
+      {preset === "custom" && (
+        <div className="timeframe-custom">
+          <input
+            type="date"
+            className="timeframe-date"
+            value={customStart}
+            max={customEnd}
+            onChange={(e) => onCustomStartChange(e.target.value)}
+          />
+          <span className="muted small">to</span>
+          <input
+            type="date"
+            className="timeframe-date"
+            value={customEnd}
+            min={customStart}
+            onChange={(e) => onCustomEndChange(e.target.value)}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
 
 const AGENT_LABELS = {
   triage: "Triage",
@@ -11,6 +78,83 @@ const AGENT_LABELS = {
   remediation: "Remediation",
   validation: "Validation",
 };
+
+function StatsBar({ stats }) {
+  if (!stats) return null;
+
+  return (
+    <>
+      <div className="card">
+        <div className="stat-label">
+          <ListChecks size={14} /> Picked up by agents
+        </div>
+        <div className="stat-value">{stats.picked_up_by_agents}</div>
+        <div className="stat-sub">of {stats.total} in range</div>
+      </div>
+      <div className="card">
+        <div className="stat-label">
+          <CheckCircle2 size={14} /> Remediated
+        </div>
+        <div className="stat-value">{stats.remediated}</div>
+      </div>
+      <div className="card">
+        <div className="stat-label">
+          <Clock size={14} /> Pending approval
+        </div>
+        <div className="stat-value">{stats.pending_approval}</div>
+      </div>
+      <div className="card">
+        <div className="stat-label">
+          <AlertTriangle size={14} /> Escalated
+        </div>
+        <div className="stat-value">{stats.escalated}</div>
+      </div>
+    </>
+  );
+}
+
+function EscalatedByAgentPanel({ stats }) {
+  if (!stats) return null;
+  const data = Object.entries(stats.escalated_by_last_agent || {}).map(([agent, count]) => ({
+    agent,
+    label: AGENT_LABELS[agent] || agent,
+    count,
+  }));
+
+  return (
+    <div className="card">
+      <div className="stat-label">
+        <PieIcon size={14} /> Escalated by agent
+      </div>
+      {stats.escalated === 0 ? (
+        <div className="stat-sub">No escalations in this time range.</div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ width: 110, minWidth: 90, flexShrink: 1 }}>
+            <ResponsiveContainer width="100%" height={110}>
+              <PieChart>
+                <Pie data={data} dataKey="count" nameKey="label" innerRadius={26} outerRadius={45} paddingAngle={2}>
+                  {data.map((row) => (
+                    <Cell key={row.agent} fill={AGENT_COLORS[row.agent] || "#9ca3af"} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="fleet-breakdown">
+            {data.map((row) => (
+              <div className="fleet-breakdown-row" key={row.agent}>
+                <span className="dot" style={{ background: AGENT_COLORS[row.agent] || "#9ca3af" }} />
+                {row.label} <b>{row.count}</b>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 const STATUS_TONE = {
   // run status
@@ -58,13 +202,40 @@ function duration(startIso, endIso) {
 function IncidentList({ onSelectIncident }) {
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState(null);
+  const [preset, setPreset] = useState("7d");
+  const today = useMemo(() => toDateInputValue(new Date()), []);
+  const [customStart, setCustomStart] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return toDateInputValue(d);
+  });
+  const [customEnd, setCustomEnd] = useState(today);
+
+  const { startIso, endIso } = useMemo(() => {
+    if (preset === "custom") {
+      // customEnd is a day, not an instant -- include the whole day.
+      const start = customStart ? new Date(`${customStart}T00:00:00`) : null;
+      const end = customEnd ? new Date(`${customEnd}T23:59:59.999`) : null;
+      return { startIso: start?.toISOString(), endIso: end?.toISOString() };
+    }
+    const range = presetRange(preset);
+    return { startIso: range?.start.toISOString(), endIso: range?.end.toISOString() };
+  }, [preset, customStart, customEnd]);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
     const load = () =>
-      api
-        .getIncidentsInProgress()
-        .then((rows) => !cancelled && setIncidents(rows))
+      Promise.all([
+        api.getIncidents({ start: startIso, end: endIso }),
+        api.getIncidentStats({ start: startIso, end: endIso }),
+      ])
+        .then(([rows, statsRow]) => {
+          if (cancelled) return;
+          setIncidents(rows);
+          setStats(statsRow);
+        })
         .finally(() => !cancelled && setLoading(false));
     load();
     const id = setInterval(load, POLL_MS);
@@ -72,20 +243,34 @@ function IncidentList({ onSelectIncident }) {
       cancelled = true;
       clearInterval(id);
     };
-  }, []);
+  }, [startIso, endIso]);
 
   return (
     <div>
       <div className="page-header">
         <div>
           <h1>Incidents</h1>
-          <p>Every incident currently in flight, and which agent (if any) is working it right now.</p>
+          <p>Every incident reported in the selected time range, and which agent (if any) is working it right now.</p>
         </div>
-        {incidents.length > 0 && <span className="badge badge-tone-accent">{incidents.length} in progress</span>}
+        {incidents.length > 0 && <span className="badge badge-tone-accent">{incidents.length} incidents</span>}
+      </div>
+
+      <TimeRangeFilter
+        preset={preset}
+        onPresetChange={setPreset}
+        customStart={customStart}
+        customEnd={customEnd}
+        onCustomStartChange={setCustomStart}
+        onCustomEndChange={setCustomEnd}
+      />
+
+      <div className="stats-row">
+        <StatsBar stats={stats} />
+        <EscalatedByAgentPanel stats={stats} />
       </div>
 
       {loading && <p className="muted">Loading…</p>}
-      {!loading && incidents.length === 0 && <p className="muted">No incidents in progress.</p>}
+      {!loading && incidents.length === 0 && <p className="muted">No incidents in this time range.</p>}
 
       {!loading && incidents.length > 0 && (
         <div className="card panel">

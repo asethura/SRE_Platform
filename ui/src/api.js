@@ -15,7 +15,21 @@ export const api = {
   getFleetActive: (agentType) => request(`/api/fleet/${agentType}/active`),
 
   getIncidentsInProgress: () => request("/api/incidents/in_progress"),
+  getIncidents: ({ start, end } = {}) => {
+    const params = new URLSearchParams();
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    const qs = params.toString();
+    return request(`/api/incidents${qs ? `?${qs}` : ""}`);
+  },
   getIncidentDetail: (incidentId) => request(`/api/incidents/${incidentId}`),
+  getIncidentStats: ({ start, end } = {}) => {
+    const params = new URLSearchParams();
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    const qs = params.toString();
+    return request(`/api/incidents/stats${qs ? `?${qs}` : ""}`);
+  },
 
   getFinOpsSummary: () => request("/api/finops/summary"),
   getFinOpsByAgent: () => request("/api/finops/by_agent"),

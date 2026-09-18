@@ -138,8 +138,63 @@ main {
   margin-bottom: 18px;
 }
 
+/* Fixed column count (no auto-fit) so the stats row never wraps to a
+   second line just because the viewport is narrower than 5 * 180px --
+   columns shrink together instead. Last column (the pie tile) gets double
+   width. */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(0, 2fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.stats-row > .card {
+  min-width: 0;
+}
+
 .panel {
   margin-bottom: 18px;
+}
+
+/* -------------------------------------------------------- timeframe filter */
+
+.timeframe-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.timeframe-btn {
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.timeframe-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent-soft);
+  font-weight: 600;
+}
+
+.timeframe-custom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.timeframe-date {
+  font-family: inherit;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .panel-header {
